@@ -1,0 +1,87 @@
+[
+  {
+    "trimStrings": [],
+    "placement": [
+      2
+    ],
+    "disabled": false,
+    "markdownOnly": false,
+    "promptOnly": true,
+    "runOnEdit": false,
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "id": "tph-hide-placeholder",
+    "scriptName": "[小手机] 01 占位符对 AI 隐藏",
+    "findRegex": "/<TPH\\b[^>]*\\/?>/gi",
+    "replaceString": ""
+  },
+  {
+    "trimStrings": [],
+    "placement": [
+      2
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": false,
+    "runOnEdit": true,
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "id": "tph-render-chan",
+    "scriptName": "[小手机] 02 渲染 · 指定会话",
+    "findRegex": "/<TPH\\b[^>]*?\\bapp=\"([^\"]+)\"[^>]*?\\bchan=\"([^\"]+)\"[^>]*?\\/?>/gi",
+    "replaceString": "<div data-tph-mount=\"$1\" data-tph-chan=\"$2\"></div>"
+  },
+  {
+    "trimStrings": [],
+    "placement": [
+      2
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": false,
+    "runOnEdit": true,
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "id": "tph-render-view",
+    "scriptName": "[小手机] 02.5 渲染 · 指定界面视图",
+    "findRegex": "/<TPH\\b[^>]*?\\bapp=\"([^\"]+)\"[^>]*?\\bview=\"([^\"]+)\"[^>]*?\\/?>/gi",
+    "replaceString": "<div data-tph-mount=\"$1\" data-tph-view=\"$2\"></div>"
+  },
+  {
+    "trimStrings": [],
+    "placement": [
+      2
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": false,
+    "runOnEdit": true,
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "id": "tph-render-app",
+    "scriptName": "[小手机] 03 渲染 · 指定界面",
+    "findRegex": "/<TPH\\b[^>]*?\\bapp=\"([^\"]+)\"[^>]*?\\/?>/gi",
+    "replaceString": "<div data-tph-mount=\"$1\"></div>"
+  },
+  {
+    "trimStrings": [],
+    "placement": [
+      2
+    ],
+    "disabled": false,
+    "markdownOnly": true,
+    "promptOnly": false,
+    "runOnEdit": true,
+    "substituteRegex": 0,
+    "minDepth": null,
+    "maxDepth": null,
+    "id": "tph-render-home",
+    "scriptName": "[小手机] 04 渲染 · 手机主页",
+    "findRegex": "/<TPH\\s*\\/?>/gi",
+    "replaceString": "<div data-tph-mount=\"home\"></div>"
+  }
+]
