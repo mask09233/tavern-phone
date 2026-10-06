@@ -1,6 +1,6 @@
-// MieMie-Extension-Build: {"schemaVersion":1,"productId":"mask09233.tavern-phone","version":"2.1.1","scriptId":"76c0fc7d-040e-4409-81ba-0f5b11e49a63","repository":"https://github.com/mask09233/tavern-phone"}
+// MieMie-Extension-Build: {"schemaVersion":1,"productId":"mask09233.tavern-phone","version":"2.1.2","scriptId":"76c0fc7d-040e-4409-81ba-0f5b11e49a63","repository":"https://github.com/mask09233/tavern-phone"}
 // ===========================================================================
-// 酒馆小手机（Tavern Phone） ——  独立版酒馆助手脚本 v2.1.1
+// 酒馆小手机（Tavern Phone） ——  独立版酒馆助手脚本 v2.1.2
 // ---------------------------------------------------------------------------
 // 定位：把「手机」搬进聊天楼层。微信私聊/群聊、朋友圈、电话等社交 App，
 //      由世界书占位符 <TPH/> 触发 → 正则渲染成挂载点 → 脚本在楼层里挂载 UI。
@@ -53,7 +53,7 @@
   /** 命名空间。所有存储键、CSS 类、正则 ID、占位符都从这里派生 */
   const NS = 'tph';
 
-  const VERSION = '2.1.1';
+  const VERSION = '2.1.2';
   const DATA_SCHEMA = 1;
 
   // —— 存储键（全部带 tph: 前缀，与「剧场 · 状态栏」的键互不干扰）——
@@ -5274,6 +5274,12 @@
   function openPhone() {
     if (session.hubApi) { mieHubOpen(); return; }   // Hub 模式：显隐与转场交给 Hub
     if (!session.root) buildRoot();
+    // 自愈 Hub 交互残留：tph-hub 类没清掉会让窗口变成"全屏居中"怪态
+    if (session.root.classList.contains('tph-hub')) {
+      session.root.classList.remove('tph-hub');
+      try { mieClearFixed(session.root); } catch (_e) { /* */ }
+    }
+    applyRect();   // Hub 化会清掉定位内联样式，打开前按记忆 rect 重设
     session.visible = true;
     session.root.removeAttribute('data-hidden');
     renderScreen();
@@ -5875,13 +5881,16 @@
     try { api.onCleanup(function () { mieInstanceTeardown(); }); } catch (_e) { /* */ }
   }
 
-  /** 面板进入 Hub 态：加类（static/居中）、清自管定位内联样式、显隐交给 Hub */
+  /**
+   * 面板进入 Hub 态：加类（static/居中）、清自管定位内联样式。
+   * 挂载后保持 data-hidden（等 showPanel 才显示）——否则 attach 一完成面板就铺满背景。
+   */
   function mieHubifyRoot() {
     try {
       if (!session.root || !HD.body.contains(session.root)) buildRoot();
       const root = session.root;
       root.classList.add('tph-hub');
-      root.removeAttribute('data-hidden');
+      root.setAttribute('data-hidden', '1');
       mieClearFixed(root);
       session.visible = false;
     } catch (e) { softFail('MieMie 面板挂载', e); }
@@ -5892,6 +5901,7 @@
     if (!a) return Promise.resolve(false);
     mieHubifyRoot();
     session.visible = true;
+    if (session.root) session.root.removeAttribute('data-hidden');   // 显示时机交给 showPanel，但自管隐藏先解除
     renderScreen();
     try { return Promise.resolve(a.showPanel()); } catch (e) {
       softFail('MieMie showPanel', e);
@@ -5903,7 +5913,16 @@
     const a = api || session.hubApi;
     if (!a) return Promise.resolve(false);
     session.visible = false;
-    try { return Promise.resolve(a.closePanel()); } catch (e) {
+    try {
+      const p = Promise.resolve(a.closePanel());
+      // 返回动画结束后再盖自管隐藏（立刻盖会把收起动画藏没）
+      p.then(function () {
+        if (!session.visible && session.root && session.hubApi) {
+          session.root.setAttribute('data-hidden', '1');
+        }
+      }, function () { /* 关闭失败忽略 */ });
+      return p;
+    } catch (e) {
       softFail('MieMie closePanel', e);
       return Promise.resolve(false);
     }
@@ -6013,21 +6032,31 @@
     };
   }
 
+  /**
+   * 恢复独立浮窗形态：清 Hub 类与动画残留内联样式，**重设几何**（applyRect）并隐藏。
+   * 没有几何恢复的话，Hub 交互过后独立打开的窗口会没有位置和尺寸。
+   */
+  function mieRestoreStandaloneRoot() {
+    try {
+      const root = session.root;
+      if (!root) return;
+      root.classList.remove('tph-hub');
+      root.removeAttribute('hidden');          // 不挡 Hub 机制，还原干净
+      mieClearFixed(root);
+      applyRect();                              // hubApi 已置空 → 生效，恢复 rect 内联定位
+      root.setAttribute('data-hidden', '1');
+    } catch (_e) { /* */ }
+  }
+
   /** 实例收尾（重新启用会创建新实例）：撤球、面板退出 Hub 态；业务与注册保留 */
   function mieInstanceTeardown() {
     try {
       if (session.mieShortcut && typeof session.mieShortcut.dispose === 'function') session.mieShortcut.dispose();
     } catch (_e) { /* */ }
     session.mieShortcut = null;
-    try {
-      if (session.root) {
-        session.root.classList.remove('tph-hub');
-        mieClearFixed(session.root);
-        session.root.setAttribute('data-hidden', '1');
-      }
-    } catch (_e) { /* */ }
-    session.hubApi = null;
+    session.hubApi = null;   // 先置空，mieRestoreStandaloneRoot 里的 applyRect 才会生效
     session.visible = false;
+    mieRestoreStandaloneRoot();
   }
 
   /** Hub 消失（disposed）：lease 已随之失效，恢复 Standalone 入口 */
@@ -6036,6 +6065,7 @@
     session.hubMode = false;
     session.hubApi = null;
     session.mieShortcut = null;
+    mieRestoreStandaloneRoot();
     try {
       if (!session.destroyed && session.booted
         && !(session.orbEl && HD.body.contains(session.orbEl))) {
@@ -6050,14 +6080,21 @@
     const lease = session.hubLease;
     session.hubLease = null;
     session.hubMode = false;
+    session.hubApi = null;
     session.mieShortcut = null;
+    if (!session.destroyed) mieRestoreStandaloneRoot();   // destroy 路径马上整树拆除，不必恢复
     try { if (lease && typeof lease.release === 'function') lease.release(); } catch (_e) { /* */ }
   }
 
   /** Hub 模式下 visible 失真校正：面板被 Hub 直接收起（无事件通知）时借 20s 时钟纠正 */
   function mieVisibleDriftFix() {
     try {
-      if (!session.hubApi || !session.visible || !session.root) return;
+      if (!session.hubApi || !session.root) return;
+      if (!session.visible) {
+        // 兜底：Hub 直接收起（走它自己的 hidden 机制）时确保自管隐藏也在
+        if (session.root.getAttribute('data-hidden') !== '1') session.root.setAttribute('data-hidden', '1');
+        return;
+      }
       if (typeof session.root.getClientRects === 'function'
         && session.root.getClientRects().length === 0) session.visible = false;
     } catch (_e) { /* */ }
@@ -6390,6 +6427,8 @@
       // 原生浮出动画用内联 fixed 定位覆盖（内联样式优先级高于类规则）
       '.tph-root.tph-hub { position: static; width: 100%; height: 100%;',
       '  display: flex; align-items: center; justify-content: center; }',
+      // Hub 用 [hidden] 属性收起面板——上面的 display:flex 会打败 UA 的 [hidden] 样式，必须让位
+      '.tph-root.tph-hub[hidden] { display: none !important; }',
       '.tph-root.tph-hub .tph-shell { max-width: 440px; }',
       // MieMie Shortcut 球：点亮 / 高亮
       '.tph-orb.mie-on { box-shadow: 0 0 0 3px rgba(122,162,247,.55), 0 6px 20px rgba(0,0,0,.28); }',
