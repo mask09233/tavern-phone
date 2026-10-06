@@ -1,3 +1,4 @@
+// MieMie-Extension-Build: {"schemaVersion":1,"productId":"mask09233.tavern-phone","version":"2.0.0","scriptId":"tph-main","repository":"https://github.com/mask09233/tavern-phone"}
 // ===========================================================================
 // 酒馆小手机（Tavern Phone） ——  独立版酒馆助手脚本 v2.0.0
 // ---------------------------------------------------------------------------
