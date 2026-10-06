@@ -1,4 +1,4 @@
-# 酒馆小手机（Tavern Phone）v2.0.0
+# 酒馆小手机（Tavern Phone）v2.1.0
 
 把「手机」搬进 SillyTavern 聊天楼层：微信私聊/群聊、朋友圈、电话、贴吧、小红书、X、记忆、档案、
 游戏（含麻将/命运抽卡/炒股）、小剧场、状态栏、音乐等 App。数据本地存储、按聊天隔离。
@@ -23,5 +23,7 @@
 
 - **MieMie Hub**：装了 [MieMie Hub](https://github.com/SheepSheepLab/MieMie-Hub) 0.8.2+ 时，
   可在 Hub 扩展中心直接在线安装/更新/卸载本产品（Extension Package v1，productId `mask09233.tavern-phone`）；
+  已接 Runtime/蜂窝 Launcher/Surface：蜂窝里有「小手机」入口，Hub「已安装」页可开「显示悬浮球」
+  （原生浮出动画，拖动与位置记忆照旧）；
 - **酒馆助手脚本导入**：酒馆助手 → 脚本库 → 导入本仓库 `酒馆助手脚本-主程序.json`
   （导入不去重，更新前先删旧脚本；正则/世界书仍按上面第 3 步装）。

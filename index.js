@@ -1,6 +1,6 @@
-// MieMie-Extension-Build: {"schemaVersion":1,"productId":"mask09233.tavern-phone","version":"2.0.0","scriptId":"tph-main","repository":"https://github.com/mask09233/tavern-phone"}
+// MieMie-Extension-Build: {"schemaVersion":1,"productId":"mask09233.tavern-phone","version":"2.1.0","scriptId":"tph-main","repository":"https://github.com/mask09233/tavern-phone"}
 // ===========================================================================
-// 酒馆小手机（Tavern Phone） ——  独立版酒馆助手脚本 v2.0.0
+// 酒馆小手机（Tavern Phone） ——  独立版酒馆助手脚本 v2.1.0
 // ---------------------------------------------------------------------------
 // 定位：把「手机」搬进聊天楼层。微信私聊/群聊、朋友圈、电话等社交 App，
 //      由世界书占位符 <TPH/> 触发 → 正则渲染成挂载点 → 脚本在楼层里挂载 UI。
@@ -53,7 +53,7 @@
   /** 命名空间。所有存储键、CSS 类、正则 ID、占位符都从这里派生 */
   const NS = 'tph';
 
-  const VERSION = '2.0.0';
+  const VERSION = '2.1.0';
   const DATA_SCHEMA = 1;
 
   // —— 存储键（全部带 tph: 前缀，与「剧场 · 状态栏」的键互不干扰）——
@@ -2796,6 +2796,12 @@
     raf: 0,
     busy: false,
 
+    // —— MieMie Hub（Extension API v1）——
+    hubMode: false,         // Hub 在场（已 provide）
+    hubLease: null,         // provide 返回的 lease（release 撤注册）
+    hubApi: null,           // 当前实例的 api 上下文（activate 置、teardown 清）
+    mieShortcut: null,      // Shortcut 球句柄（Hub mount 回调存入）
+
     // —— 数据（按 chatKey 隔离，启动时加载）——
     chats: [],
     moments: [],
@@ -4817,6 +4823,7 @@
   }
 
   function applyRect() {
+    if (session.hubApi) return;   // Hub 模式：面板定位交给 Hub / 原生浮出动画，不吃自管 rect
     if (!session.root || !session.rect) return;
     const r = session.rect;
     session.root.style.left = r.x + 'px';
@@ -4852,8 +4859,14 @@
 
   // ========================= 悬浮球 =========================
 
-  function buildOrb() {
+  /**
+   * 建悬浮球。opts.hubOpen：MieMie Hub Shortcut 模式 —— 点击改调 Hub 的 open 回调
+   * （Hub 捕获正确打开来源），且禁用「双击彻底退出」（Hub 在时生命周期归 Hub 管）。
+   * 拖动/位置记忆照旧；球事件全挂在球元素上，移除元素即完成 dispose。
+   */
+  function buildOrb(opts) {
     if (session.orbEl && HD.body.contains(session.orbEl)) return;
+    const hubOpen = (opts && typeof opts.hubOpen === 'function') ? opts.hubOpen : null;
     // 悬浮球是唯一的入口：不加 role/tabindex 的话，键盘用户根本打不开手机
     const orb = h('div', {
       class: 'tph-orb', title: '小手机 · 单击开关 / 拖动移动',
@@ -4906,6 +4919,7 @@
 
     on(orb, 'click', () => {
       if (suppressClick) return;
+      if (hubOpen) { hubOpen(); return; }
       togglePhone();
     });
 
@@ -4913,11 +4927,13 @@
     on(orb, 'keydown', (ev) => {
       if (ev.key !== 'Enter' && ev.key !== ' ' && ev.key !== 'Spacebar') return;
       ev.preventDefault();
+      if (hubOpen) { hubOpen(); return; }
       togglePhone();
     });
 
     on(orb, 'dblclick', (ev) => {
       ev.preventDefault();
+      if (hubOpen) return;   // Hub Shortcut 球不提供「双击销毁」
       if (HW.confirm('彻底退出「酒馆小手机」？\n（浮窗、悬浮球与全部监听将被清除，已保存的数据不受影响）')) destroyPhone();
     });
 
@@ -5033,6 +5049,7 @@
 
   /** 每 20 秒刷一次时间：浮窗 + 楼层里所有内嵌手机一起（只改文本，不重绘） */
   function tickShell() {
+    mieVisibleDriftFix();   // Hub 模式：面板可能被 Hub 直接收起（无事件通知），借时钟校正 visible
     const t = clockText();
     if (session.status && session.status.time) session.status.time.textContent = t;
     (session.inlineMounts || []).forEach((m) => {
@@ -5155,6 +5172,7 @@
   let _drag = null;
   function bindDrag(handle) {
     on(handle, 'pointerdown', (ev) => {
+      if (session.hubApi) return;   // Hub 模式：面板位置归 Hub 管，拖动停用
       if (ev.button !== 0) return;
       if (ev.target && ev.target.closest && ev.target.closest('button')) return;
       ev.preventDefault();
@@ -5191,6 +5209,7 @@
   let _resize = null;
   function bindResize(grip) {
     on(grip, 'pointerdown', (ev) => {
+      if (session.hubApi) return;   // Hub 模式：缩放停用
       if (ev.button !== 0) return;
       ev.stopPropagation();
       ev.preventDefault();
@@ -5253,6 +5272,7 @@
   // ========================= 开关与路由 =========================
 
   function openPhone() {
+    if (session.hubApi) { mieHubOpen(); return; }   // Hub 模式：显隐与转场交给 Hub
     if (!session.root) buildRoot();
     session.visible = true;
     session.root.removeAttribute('data-hidden');
@@ -5260,6 +5280,7 @@
   }
 
   function closePhone() {
+    if (session.hubApi) { mieHubClose(); return; }  // 面板收回走 Hub（含返回动画），不是停用
     session.visible = false;
     if (session.root) session.root.setAttribute('data-hidden', '1');
   }
@@ -5438,6 +5459,8 @@
 
   function destroyPhone() {
     session.destroyed = true;
+    // MieMie Hub：先释放 Runtime 注册（lease），再走自身清理
+    try { mieRelease(); } catch (_e) { /* Hub 已不在 */ }
     // 定时器
     try { if (session.clockTimer) clearInterval(session.clockTimer); } catch (_e) { /* */ }
     try { if (session.inlineClockTimer) clearInterval(session.inlineClockTimer); } catch (_e) { /* */ }
@@ -5731,6 +5754,313 @@
         } catch (e) { softFail('MESSAGE_RECEIVED', e); }
       });
     }
+  }
+
+  // ===========================================================================
+  // 9b. MieMie Hub 集成（Extension API v1：Runtime 注册 + 蜂窝 Launcher + Surface + 原生 Shortcut）
+  // ---------------------------------------------------------------------------
+  // 单业务实例：数据层/楼层内嵌/事件/心跳只在脚本加载时 boot 一次；Hub 只接管
+  // 「入口与面板展示」——不二次 boot、不二次 Hook（LAUNCHER-PROTOCOL v1）。
+  //
+  // 交接规则：
+  //   · window.parent.__MieMieHub（apiVersion===1）在场，或父窗口发来 miemie:hub-ready
+  //     → 撤下自绘悬浮球，hub.extensions.provide(manifest, factory) 取 lease
+  //   · miemie:hub-disposed → 恢复 Standalone（重建悬浮球）
+  //   · Hub 仍存在而用户停用扩展时，不复活独立入口（不绕过用户选择）
+  //   · destroyPhone / pagehide → lease.release()
+  // ===========================================================================
+
+  /** 与 build-package.js 的 MIE_PRODUCT_ID 必须一致（构建自检 4j 会核对，防漂移） */
+  const MIE_RUNTIME_ID = 'mask09233.tavern-phone';
+
+  /** Runtime provide 用的 manifest（contributes.launcher = 蜂窝入口；icon ≤16 字符） */
+  function mieRuntimeManifest() {
+    return {
+      schemaVersion: 1,
+      apiVersion: 1,
+      id: MIE_RUNTIME_ID,
+      name: '酒馆小手机',
+      version: VERSION,
+      contributes: { launcher: { title: '小手机', icon: '📱' } },
+    };
+  }
+
+  /** 探测 Hub：宿主窗口（酒馆助手 iframe 的 parent / 扩展态的自身）上的 __MieMieHub */
+  function mieFindHub() {
+    try {
+      const w = hostWindow();
+      const cand = w.__MieMieHub || (w.parent && w.parent.__MieMieHub);
+      if (cand && cand.apiVersion === 1 && cand.extensions
+        && typeof cand.extensions.provide === 'function') return cand;
+    } catch (_e) { /* 跨域或未安装 */ }
+    return null;
+  }
+
+  /**
+   * boot 时调：在场则立即接管（返回 true = 不再建自绘悬浮球）；
+   * 不在场则挂 miemie:hub-ready / hub-disposed 监听等晚到的 Hub。
+   */
+  function mieHubBoot() {
+    try {
+      on(HW, 'miemie:hub-ready', (e) => {
+        mieHubTakeover((e && e.detail) || null);
+      });
+      on(HW, 'miemie:hub-disposed', () => { mieHubResumeStandalone(); });
+    } catch (_e) { /* 宿主窗口不可监听 */ }
+    return mieHubTakeover(null);
+  }
+
+  /**
+   * Hub 接管：撤独立入口 → 提供工厂 → 存 lease。
+   * 幂等：已有 lease / 已销毁时直接返回当前状态。
+   */
+  function mieHubTakeover(hub) {
+    if (session.destroyed) return false;
+    if (session.hubLease) return true;
+    const h = hub || mieFindHub();
+    if (!h) return false;
+    try {
+      // 1) 撤下自绘悬浮球（Hub 存在期间不得复活独立入口）
+      try {
+        if (session.orbEl && session.orbEl.parentNode) session.orbEl.parentNode.removeChild(session.orbEl);
+        session.orbEl = null;
+      } catch (_e) { /* */ }
+      // 2) 独立浮窗若开着，先静默收起（面板展示从现在起归 Hub）
+      try {
+        if (session.root) session.root.setAttribute('data-hidden', '1');
+        session.visible = false;
+      } catch (_e) { /* */ }
+      // 3) 提供工厂
+      const lease = h.extensions.provide(mieRuntimeManifest(), mieFactory);
+      if (!lease || lease.ok === false) throw new Error((lease && lease.error) || 'provide 被拒绝');
+      session.hubLease = lease;
+      session.hubMode = true;
+      // 注册失败（如 Hub 正在关闭）→ 回落独立模式
+      try {
+        if (lease.ready && typeof lease.ready.then === 'function') {
+          lease.ready.then(null, () => { mieHubResumeStandalone(); });
+        }
+      } catch (_e) { /* */ }
+      notify('已接入 MieMie Hub：入口移至蜂窝，可在 Hub「已安装」里开启悬浮球', 'info');
+      return true;
+    } catch (e) {
+      softFail('MieMie Hub 接管', e);
+      return false;
+    }
+  }
+
+  /** 工厂：每次启用由 Hub 创建新实例；面板 UI 生命周期跟随实例，业务共享同一次 boot */
+  function mieFactory(api) {
+    session.hubApi = api;
+    return {
+      activate: function () { mieActivate(api); },
+      open: function () { return mieHubOpen(api); },
+    };
+  }
+
+  function mieActivate(api) {
+    // 业务兜底（正常路径 boot 已跑过；这是给「Hub 先就绪、脚本后注入」之外的极端序）
+    try { if (!session.booted && typeof boot === 'function') boot(); } catch (_e) { /* */ }
+    mieHubifyRoot();
+    try { api.attachPanel(session.root); } catch (e) { softFail('MieMie attachPanel', e); }
+    // 原生悬浮球 Shortcut：Hub 用户开「显示悬浮球」后才回调 mount（默认关）
+    try {
+      if (typeof api.registerShortcutLauncher === 'function') {
+        api.registerShortcutLauncher({
+          mount: function (o) { return mieShortcutMount(api, o); },
+        });
+      }
+    } catch (e) { softFail('MieMie Shortcut 注册', e); }
+    // 实例收尾（停用/注销时由 Hub 调）：只清 UI 态，不动业务与注册
+    try { api.onCleanup(function () { mieInstanceTeardown(); }); } catch (_e) { /* */ }
+  }
+
+  /** 面板进入 Hub 态：加类（static/居中）、清自管定位内联样式、显隐交给 Hub */
+  function mieHubifyRoot() {
+    try {
+      if (!session.root || !HD.body.contains(session.root)) buildRoot();
+      const root = session.root;
+      root.classList.add('tph-hub');
+      root.removeAttribute('data-hidden');
+      mieClearFixed(root);
+      session.visible = false;
+    } catch (e) { softFail('MieMie 面板挂载', e); }
+  }
+
+  function mieHubOpen(api) {
+    const a = api || session.hubApi;
+    if (!a) return Promise.resolve(false);
+    mieHubifyRoot();
+    session.visible = true;
+    renderScreen();
+    try { return Promise.resolve(a.showPanel()); } catch (e) {
+      softFail('MieMie showPanel', e);
+      return Promise.resolve(false);
+    }
+  }
+
+  function mieHubClose(api) {
+    const a = api || session.hubApi;
+    if (!a) return Promise.resolve(false);
+    session.visible = false;
+    try { return Promise.resolve(a.closePanel()); } catch (e) {
+      softFail('MieMie closePanel', e);
+      return Promise.resolve(false);
+    }
+  }
+
+  /** Shortcut 球：复用 buildOrb（拖动/位置记忆保留），点击走 Hub 的 open 回调 */
+  function mieShortcutMount(api, opts) {
+    const open = (opts && typeof opts.open === 'function')
+      ? opts.open
+      : function () { return mieHubOpen(api); };
+    buildOrb({ hubOpen: open });
+    const orb = session.orbEl;
+    const handle = {
+      getOrigin: function () { return (orb && HD.body.contains(orb)) ? orb : null; },
+      setActive: function (on) { try { orb.classList.toggle('mie-on', !!on); } catch (_e) { /* */ } },
+      highlight: function () {
+        try {
+          orb.classList.add('mie-flash');
+          HW.setTimeout(function () { try { orb.classList.remove('mie-flash'); } catch (_e) { /* */ } }, 620);
+        } catch (_e) { /* */ }
+      },
+      presentation: miePresentation(function () { return orb; }),
+      dispose: function () {
+        try { if (orb && orb.parentNode) orb.parentNode.removeChild(orb); } catch (_e) { /* */ }
+        if (session.orbEl === orb) session.orbEl = null;
+        session.mieShortcut = null;
+      },
+    };
+    session.mieShortcut = handle;
+    return handle;
+  }
+
+  /** 清掉浮出动画留下的 fixed 内联定位，回 Hub 静态布局 */
+  function mieClearFixed(root) {
+    if (!root) return;
+    root.style.position = '';
+    root.style.left = '';
+    root.style.top = '';
+    root.style.width = '';
+    root.style.height = '';
+    root.style.opacity = '';
+  }
+
+  /**
+   * 共享原生浮出动画（可选能力）：面板从悬浮球飞出 / 收回悬浮球。
+   * place 同步落位；run 返回完成 Promise（WAAPI，320ms，远低于 5s 存活上限）；
+   * 抛错/缺 API 时 Hub 自动回落默认转场。release 后清内联样式——蜂窝下次打开是干净静态布局。
+   */
+  function miePresentation(getOrb) {
+    let anim = null;
+    function stop() {
+      try { if (anim) anim.cancel(); } catch (_e) { /* */ }
+      anim = null;
+    }
+    function target() {
+      // 目标位 = 独立浮窗记忆的 rect（夹进当前视口；窄屏全屏由 clampRect 处理）
+      return clampRect(session.rect || loadRect(), viewportRect());
+    }
+    function setFixed(root, r) {
+      root.style.position = 'fixed';
+      root.style.left = r.x + 'px';
+      root.style.top = r.y + 'px';
+      root.style.width = r.w + 'px';
+      root.style.height = r.h + 'px';
+    }
+    return {
+      place: function (panel) {
+        stop();
+        const root = panel || session.root;
+        if (!root) return;
+        setFixed(root, target());
+      },
+      run: function (panel, opening) {
+        const root = panel || session.root;
+        const orb = getOrb();
+        if (!root || !orb
+          || typeof root.animate !== 'function'
+          || typeof orb.getBoundingClientRect !== 'function') return Promise.resolve();
+        const t = target();
+        const o = orb.getBoundingClientRect();
+        setFixed(root, t);
+        const from = {
+          left: (o.left + o.width / 2 - t.w / 2) + 'px',
+          top: (o.top + o.height / 2 - t.h / 2) + 'px',
+          width: Math.max(24, o.width) + 'px',
+          height: Math.max(24, o.height) + 'px',
+          opacity: '0.55',
+        };
+        const to = { left: t.x + 'px', top: t.y + 'px', width: t.w + 'px', height: t.h + 'px', opacity: '1' };
+        const kf = opening ? [from, to] : [to, from];
+        stop();
+        try {
+          anim = root.animate(kf, { duration: 320, easing: 'cubic-bezier(.22,.9,.28,1)' });
+          return anim.finished.then(function () {
+            if (!opening) mieClearFixed(root);   // 收回后回静态布局，蜂窝下次打开干净
+          }, function () { /* 被取消 */ });
+        } catch (_e) {
+          anim = null;
+          return Promise.resolve();
+        }
+      },
+      cancel: function () { stop(); },
+      release: function () {
+        stop();
+        mieClearFixed(session.root);
+      },
+    };
+  }
+
+  /** 实例收尾（重新启用会创建新实例）：撤球、面板退出 Hub 态；业务与注册保留 */
+  function mieInstanceTeardown() {
+    try {
+      if (session.mieShortcut && typeof session.mieShortcut.dispose === 'function') session.mieShortcut.dispose();
+    } catch (_e) { /* */ }
+    session.mieShortcut = null;
+    try {
+      if (session.root) {
+        session.root.classList.remove('tph-hub');
+        mieClearFixed(session.root);
+        session.root.setAttribute('data-hidden', '1');
+      }
+    } catch (_e) { /* */ }
+    session.hubApi = null;
+    session.visible = false;
+  }
+
+  /** Hub 消失（disposed）：lease 已随之失效，恢复 Standalone 入口 */
+  function mieHubResumeStandalone() {
+    session.hubLease = null;
+    session.hubMode = false;
+    session.hubApi = null;
+    session.mieShortcut = null;
+    try {
+      if (!session.destroyed && session.booted
+        && !(session.orbEl && HD.body.contains(session.orbEl))) {
+        buildOrb();
+        notify('MieMie Hub 已退出，恢复悬浮球入口', 'info');
+      }
+    } catch (e) { softFail('恢复独立入口', e); }
+  }
+
+  /** 主动释放 Runtime 注册（destroyPhone / pagehide 用；幂等） */
+  function mieRelease() {
+    const lease = session.hubLease;
+    session.hubLease = null;
+    session.hubMode = false;
+    session.mieShortcut = null;
+    try { if (lease && typeof lease.release === 'function') lease.release(); } catch (_e) { /* */ }
+  }
+
+  /** Hub 模式下 visible 失真校正：面板被 Hub 直接收起（无事件通知）时借 20s 时钟纠正 */
+  function mieVisibleDriftFix() {
+    try {
+      if (!session.hubApi || !session.visible || !session.root) return;
+      if (typeof session.root.getClientRects === 'function'
+        && session.root.getClientRects().length === 0) session.visible = false;
+    } catch (_e) { /* */ }
   }
 
   // ===========================================================================
@@ -6056,6 +6386,16 @@
       '.tph-root { position: fixed; z-index: 2147482001; font-family: var(--tph-font); font-size: 13px; color: var(--tph-text);',
       '  line-height: 1.5; box-sizing: border-box; }',
       '.tph-root[data-hidden="1"] { display: none; }',
+      // MieMie Hub 模式：面板定位/过渡归 Hub（静态铺满其容器层，手机居中限宽）；
+      // 原生浮出动画用内联 fixed 定位覆盖（内联样式优先级高于类规则）
+      '.tph-root.tph-hub { position: static; width: 100%; height: 100%;',
+      '  display: flex; align-items: center; justify-content: center; }',
+      '.tph-root.tph-hub .tph-shell { max-width: 440px; }',
+      // MieMie Shortcut 球：点亮 / 高亮
+      '.tph-orb.mie-on { box-shadow: 0 0 0 3px rgba(122,162,247,.55), 0 6px 20px rgba(0,0,0,.28); }',
+      '.tph-orb.mie-flash { animation: tph-mie-flash .6s ease; }',
+      '@keyframes tph-mie-flash { 0%, 100% { box-shadow: 0 6px 20px rgba(0,0,0,.28); }',
+      '  50% { box-shadow: 0 0 0 10px rgba(122,162,247,.55); } }',
       '.tph-root *, .tph-inline * { box-sizing: border-box; }',
       '.tph-shell { position: relative; width: 100%; height: 100%; display: flex; flex-direction: column; overflow: hidden;',
       '  background: var(--tph-bg); border: 1px solid var(--tph-border); border-radius: var(--tph-shell-rad, 18px);',
@@ -25704,6 +26044,10 @@ function mediaCssRules() {
         _extractChars: extractCharacters,
         _runUpdate: runUpdate,
         _specialMem: buildSpecialMemoryBlock,
+        _mieHub: {                          // —— MieMie Hub（测试出口：伪 Hub 驱动全链路）——
+          takeover: mieHubTakeover, resume: mieHubResumeStandalone, release: mieRelease,
+          manifest: mieRuntimeManifest,
+        },
         _mj: {                          // —— 麻将（测试出口：听牌 / 番种卡 数据面）——
           state: mjState, tenpaiOf: mjTenpaiOf, waitsOf: mjWaitsOf,
           decompOK: mjDecompOK, winCardOf: mjWinCardOf, countMap: mjCountMap, norm: mjNorm,
@@ -25764,7 +26108,8 @@ function mediaCssRules() {
       // 启动时按用户设置的自动清理阈值即时裁剪一次（调低阈值后重启生效）
       try { if (typeof runStorageClean === 'function') runStorageClean(); } catch (_e) { /* 清理失败不影响启动 */ }
       session.rect = loadRect();
-      buildOrb();
+      // MieMie Hub 在场则接管入口（provide 工厂，不建自绘球）；否则独立悬浮球
+      if (!mieHubBoot()) buildOrb();
       exposeApi();
       inlineWatchStart();
       bindEvents();
