@@ -1,6 +1,6 @@
-// MieMie-Extension-Build: {"schemaVersion":1,"productId":"mask09233.tavern-phone","version":"2.1.2","scriptId":"76c0fc7d-040e-4409-81ba-0f5b11e49a63","repository":"https://github.com/mask09233/tavern-phone"}
+// MieMie-Extension-Build: {"schemaVersion":1,"productId":"mask09233.tavern-phone","version":"2.2.0","scriptId":"76c0fc7d-040e-4409-81ba-0f5b11e49a63","repository":"https://github.com/mask09233/tavern-phone"}
 // ===========================================================================
-// 酒馆小手机（Tavern Phone） ——  独立版酒馆助手脚本 v2.1.2
+// 酒馆小手机（Tavern Phone） ——  独立版酒馆助手脚本 v2.2.0
 // ---------------------------------------------------------------------------
 // 定位：把「手机」搬进聊天楼层。微信私聊/群聊、朋友圈、电话等社交 App，
 //      由世界书占位符 <TPH/> 触发 → 正则渲染成挂载点 → 脚本在楼层里挂载 UI。
@@ -53,7 +53,7 @@
   /** 命名空间。所有存储键、CSS 类、正则 ID、占位符都从这里派生 */
   const NS = 'tph';
 
-  const VERSION = '2.1.2';
+  const VERSION = '2.2.0';
   const DATA_SCHEMA = 1;
 
   // —— 存储键（全部带 tph: 前缀，与「剧场 · 状态栏」的键互不干扰）——
@@ -87,6 +87,7 @@
   const K_READ = NS + ':v1:read-ts';             // 已读时间戳水位 { chatKey: { tb, rn, x } }（贴吧/小红书消息、X通知）
   const K_GACHA = NS + ':v1:gacha';             // 命运抽卡 { chatKey: { wallet, specials, lastFloor } }
   const K_STOCK = NS + ':v1:stock';             // 炒股 { chatKey: { pool, holdings, news, day, realized, trades } }（钱包共用 K_GACHA）
+  const K_NEWS = NS + ':v1:news';        // 报纸 { chatKey: [issue] }
   const K_MAHJONG = NS + ':v1:mahjong';  // 麻将牌局（暂用于将来持久化，当前牌局走内存 session）
 
   /** 每个聊天键下保留的最大会话数 / 消息数，防 localStorage 爆量 */
@@ -98,6 +99,7 @@
   const TRIM_REDNOTE = 80;
   const TRIM_X = 120;
   const TRIM_THEATER = 30;
+  const TRIM_NEWS = 30;                  // 报纸保留期数
   const MAX_MSGS_PER_CHAT = 300;
 
   /**
@@ -131,6 +133,7 @@
     '麻将闲聊': 800,
     '股票池生成': 2000,
     '股票新闻': 1200,
+    '报纸出版': 3500,
   };
   const MAX_TOKENS_DEFAULT = 2000;
 
@@ -158,6 +161,7 @@
     { id: 'profiles', name: '档案', icon: 'app-profiles', bg: '#5856D6' },
     { id: 'game', name: '游戏', icon: 'app-game', bg: '#576B95' },
     { id: 'stock', name: '股票', icon: 'app-stock', bg: '#F59E0B' },
+    { id: 'news', name: '报纸', icon: 'app-news', bg: '#3F4A5A' },
     { id: 'theater', name: '小剧场', icon: 'app-theater', bg: '#9B59B6' },
     { id: 'status', name: '状态栏', icon: 'app-status', bg: '#3498DB' },
     { id: 'music', name: '音乐', icon: 'app-music', bg: '#FF6482' },
@@ -227,7 +231,7 @@
   const MSG_KINDS = ['text', 'image', 'voice', 'redpacket', 'transfer', 'system'];
 
   /** 提示词作用域：决定哪些调用套用哪些条目 */
-  const ENTRY_SCOPES = ['all', 'wechat', 'moments', 'call', 'memory', 'assistant', 'tieba', 'rednote', 'x', 'calendar', 'game', 'profiles', 'theater', 'status'];
+  const ENTRY_SCOPES = ['all', 'wechat', 'moments', 'call', 'memory', 'assistant', 'tieba', 'rednote', 'x', 'calendar', 'game', 'profiles', 'theater', 'status', 'stock', 'news'];
 
   // ---------------------------------------------------------------------------
   // 默认提示词（全部可被用户覆盖；改过的存 K_PROMPTS，与默认值按键覆盖）
@@ -784,11 +788,12 @@
 
     stockNewsGen: [
       '【财经新闻】',
-      '你是这个股票市场的财经新闻编辑。结合世界观与当前行情，写 2~4 条会影响股价的新闻。',
+      '你是这个股票市场的财经新闻编辑。结合世界观、**当前剧情**与当前行情，写 2~4 条会影响股价的新闻。',
       '',
       '要求：',
+      '- 每条新闻必须**引用或呼应剧情中的具体事件**（人物动向、冲突、商业活动、传闻风波），把剧情影响映射到对应股票的涨跌；禁止脱离剧情编纯财经新闻',
       '- target 必须是【当前行情】里出现过的股票名',
-      '- impact 是这条新闻对目标股票的即时冲击百分比，-15 ~ +15 之间（利好正、利空负）',
+      '- impact 是这条新闻对目标股票的即时冲击百分比，-15 ~ +15 之间（利好正、利空负）；受 ±10% 涨跌停约束，超出部分会被截断',
       '- headline 是新闻标题（20~40字，像真实财经新闻）；reason 一句话说明利好/利空逻辑',
       '',
       '只输出 JSON：{"news":[{"target":"股票名","headline":"标题","impact":8,"reason":"一句话原因"}]}',
@@ -802,16 +807,18 @@
     ].join('\n'),
 
     stockInsiderGen: [
-      '【内幕消息】',
-      '你是这个股票市场的知情者。结合世界观与剧情，给出一条「内幕消息」——主角通过特殊渠道打听到、尚未公开的关键情报。',
+      '【打听内幕】',
+      '你就是「{{who}}」。主角私下向你打听股票的内幕消息，请按你的身份、性格和与主角的关系，说一条消息。',
+      '{{profile}}',
       '',
       '要求：',
+      '- line 是你以自己的口吻说的一句话（30字内，符合身份：内部人可以言之凿凿，普通人可能是道听途说）',
       '- target 必须是【当前行情】里出现过的股票名',
-      '- impact 是这条消息对目标股票的即时冲击百分比，-25 ~ +25 之间（利好正、利空负）',
-      '- headline 是消息标题（20~40字，像内部通报或小道消息）；reason 一句话说明消息来源与传导逻辑',
-      '- 消息要像从当前剧情里流出来的，不要凭空捏造无关事件',
+      '- impact 是这条消息**若为真**对目标股票的冲击百分比，-25 ~ +25（注意个股有 ±10% 涨跌停）',
+      '- reliable 是消息可靠度：你确实知情或来源可信=true；道听途说、猜测或想坑主角=false',
+      '- 消息内容要从当前剧情里来，不要凭空捏造',
       '',
-      '只输出 JSON：{"target":"股票名","headline":"标题","impact":18,"reason":"一句话原因"}',
+      '只输出 JSON：{"target":"股票名","line":"你的原话","impact":18,"reliable":true}',
       '不要输出其他文字。',
       '',
       '世界观与剧情背景：',
@@ -858,6 +865,38 @@
       '{{context}}',
       '',
       '当前行情与行业：',
+      '{{market}}',
+    ].join('\n'),
+
+    newsIssue: [
+      '【报纸出版】',
+      '你是《{{name}}》的主编。结合世界观与**最近剧情**，为这一期报纸定稿。',
+      '',
+      '要求：',
+      '- name 是报纸刊名（4~6字，贴合世界观）。若【报纸刊名】已有值，原样回填，不要改',
+      '- masthead.headline 是头版头条标题（15~25字），必须呼应最近剧情里真实发生的事',
+      '- masthead.lead 是头条导语（40~70字，交代时间、地点、人物）',
+      '- front 是头版要闻正文：title 标题（15~25字），body 正文（120~200字，像新闻稿，第三人称），who 填文中涉及的角色名（多人用「、」分隔，没有就留空）',
+      '- finance 是 2~3 条财经消息：target 必须是【当前行情】里出现过的股票名；impact 是即时冲击百分比（-15 ~ +15，注意个股有 ±10% 涨跌停，超出会被截断）；headline 20~40字；reason 一句话说明利好/利空的传导逻辑。财经消息要与剧情挂钩，不要凭空编纯财经新闻',
+      '- chance 是 2~3 条「启事 / 机会」：报纸上的招募、悬赏、寻人、拍卖、邀约、求助。每条都要是主角**真的可以接**的剧情钩子。title 8~16字；body 40~80字（说清是什么事、在哪儿、有什么好处）；who 是发布者姓名或机构（没有就留空）；days 是「几日后」的相对天数（1~7 的整数）',
+      '- 全部内容贴合当前世界观与剧情，像从主线里长出来的',
+      '- 【上期头条】里若有事还没了结，优先在本期写出跟进报道',
+      '',
+      '只输出 JSON：',
+      '{"name":"刊名","masthead":{"headline":"头条标题","lead":"导语"},',
+      ' "front":{"title":"标题","body":"正文","who":"涉及角色"},',
+      ' "finance":[{"target":"股票名","headline":"标题","impact":8,"reason":"原因"}],',
+      ' "chance":[{"title":"标题","body":"说明","who":"发布者","days":3}]}',
+      '不要输出其他文字。',
+      '',
+      '报纸刊名：{{name}}',
+      '发行日：{{date}}',
+      '上期头条：{{lastIssue}}',
+      '',
+      '世界观与剧情背景：',
+      '{{context}}',
+      '',
+      '当前行情：',
       '{{market}}',
     ].join('\n'),
 
@@ -1013,6 +1052,7 @@
     stockInsiderGen: '股票 · 内幕消息',
     stockReviewGen: '股票 · 复盘点评',
     stockShockGen: '股票 · 黑天鹅事件',
+    newsIssue: '报纸 · 出版一期',
     theaterGen: '小剧场 · 剧本生成',
     stageGen: '小剧场 · 舞台演出',
     statusExtract: '状态栏 · AI提取',
@@ -1203,6 +1243,7 @@
       tieba: 80,                     // 贴吧帖子保留条数
       rednote: 80,                   // 小红书笔记保留条数
       x: 120,                        // X 推文保留条数
+      news: 30,                      // 报纸保留期数
       interview: 30,                 // 采访记录保留条数
       diary: 100,                    // 日记保留条数
       fortune: 30,                   // 运势记录保留条数
@@ -1219,6 +1260,13 @@
     mahjong: {
       url: '',               // 云规则库地址（github raw 等，走酒馆代理加载；留空用本地兜底规则）
       chatEvery: 4,          // 每 N 次出牌自动让角色说句话
+    },
+
+    // 报纸
+    news: {
+      masthead: '',          // 报刊名（留空则首次出版由 AI 按世界观起名，起好后就固定下来）
+      lifeStyle: 'city',     // 民生版风格：city 都市 | fantasy 奇幻 | off 不要民生版
+      lifeCount: 5,          // 民生版每期条数（本地模板池随机，2~8）
     },
   };
 
@@ -1681,6 +1729,10 @@
     lock: '<rect x="4.5" y="10.5" width="15" height="9.5" rx="2.5"/><path d="M8 10.5V7.8a4 4 0 018 0v2.7"/>',
     gift: '<rect x="3.5" y="8" width="17" height="12" rx="2"/><path d="M3.5 12.5h17M12 8v12"/><path d="M12 8S9.5 8 8.5 7a1.8 1.8 0 012.5-2.6C12 5.4 12 8 12 8zM12 8s2.5 0 3.5-1a1.8 1.8 0 00-2.5-2.6C12 5.4 12 8 12 8z"/>',
     card: '<rect x="3" y="5.5" width="18" height="13" rx="2.5"/><path d="M3 10h18M6.5 14.5h4"/>',
+    // 报纸：版头横线 + 左图块 + 右两行文本（空态/报纸 App 用）
+    news: '<rect x="3" y="5" width="18" height="14" rx="2.2"/><path d="M5.8 8.2h8.4M5.8 18.6h12.4"/>'
+      + '<rect x="5.8" y="11" width="5.4" height="4.2" rx="1"/>'
+      + '<path d="M13.2 11.6h4.9M13.2 14h4.9M13.2 16.4h2.6"/>',
     wifi: '<path d="M3.4 9.3a13.2 13.2 0 0 1 17.2 0"/><path d="M6.4 12.6a8.7 8.7 0 0 1 11.2 0"/><path d="M9.4 15.8a4.4 4.4 0 0 1 5.2 0"/><circle cx="12" cy="18.8" r="1.1"/>',
     house: '<path d="M3.8 10.7L12 4l8.2 6.7"/><path d="M6 9.7V19a1.5 1.5 0 0 0 1.5 1.5h9A1.5 1.5 0 0 0 18 19V9.7"/><path d="M10 20.5v-5.4h4v5.4"/>',
 
@@ -1771,6 +1823,13 @@
       + '<rect x="10.25" y="10.6" width="3.4" height="4.4" fill="var(--tph-app-bg)"/>'
       + '<rect x="15.9" y="6" width="1.1" height="9" fill="var(--tph-app-bg)"/>'
       + '<rect x="14.7" y="8.2" width="3.4" height="4.6" fill="var(--tph-app-bg)"/>',
+    // 报纸：报头横条 + 左侧图块 + 右侧两行文字 + 底部一栏
+    'app-news': '<rect x="2.6" y="4.4" width="18.8" height="15.2" rx="2.4" fill="currentColor"/>'
+      + '<rect x="4.6" y="6.7" width="14.8" height="2.2" rx="1.1" fill="var(--tph-app-bg)"/>'
+      + '<rect x="4.6" y="10.5" width="6.4" height="4.5" rx="1" fill="var(--tph-app-bg)"/>'
+      + '<rect x="12.6" y="10.5" width="6.8" height="1.4" rx=".7" fill="var(--tph-app-bg)"/>'
+      + '<rect x="12.6" y="13.6" width="6.8" height="1.4" rx=".7" fill="var(--tph-app-bg)"/>'
+      + '<rect x="4.6" y="16.6" width="14.8" height="1.4" rx=".7" fill="var(--tph-app-bg)"/>',
     'app-status': '<rect x="3.5" y="4" width="17" height="16" rx="2.5" fill="currentColor"/>'
       + '<rect x="5.5" y="6.2" width="6" height="3.2" rx="1" fill="var(--tph-app-bg)"/>'
       + '<rect x="12.5" y="6.2" width="6" height="3.2" rx="1" fill="var(--tph-app-bg)" opacity="0.5"/>'
@@ -2087,6 +2146,9 @@
     '麻将闲聊': 'game',
     '股票池生成': 'game',
     '股票新闻': 'game',
+    '内幕消息': 'game',
+    '黑天鹅事件': 'game',
+    '复盘点评': 'game',
     '剧场生成': 'theater',
     '舞台演出': 'theater',
     '状态栏提取': 'status',
@@ -2809,6 +2871,7 @@
     memoryList: [],
     tiebaPosts: [],
     redNotes: [],
+    newsIssues: [],
     xTweets: [],
     portrait: {},
     musicTracks: [],
@@ -3308,6 +3371,7 @@
     loadTieba();
     loadTbFollows();
     loadRedNotes();
+    loadNews();
     loadXTweets();
     loadMusic();
     loadTheater();
@@ -3775,6 +3839,186 @@
     return (session.calendar || []).slice().sort((a, b) => String(a.date).localeCompare(String(b.date)));
   }
 
+  // ========================= 报纸 =========================
+  //
+  // 一期报纸 = 一个 issue 对象，四个版面。设计要点：
+  //   · 头版要闻 / 财经 / 启事 三版由 AI 写（有效内容），民生版从本地模板池抽（零 token）
+  //   · 财经版条目出版时经 stockNewsApply 结算股价（涨跌停内），并 unshift 进 stock 的 d.news
+  //   · 「启事·机会」是剧情钩子：玩家可一键存日程 / 写记忆，把线索挂到 AI 的上下文里
+  //   · 条目都带 id —— 剪报（clips）按 id 收藏单条
+
+  /** config.news 稳定读取：缺字段补默认值（不落库，用户改完由设置页 saveConfig） */
+  function newsCfg() {
+    if (!config.news || typeof config.news !== 'object' || Array.isArray(config.news)) config.news = {};
+    const c = config.news;
+    c.masthead = typeof c.masthead === 'string' ? c.masthead : String(c.masthead || '');
+    if (c.lifeStyle !== 'city' && c.lifeStyle !== 'fantasy' && c.lifeStyle !== 'off') c.lifeStyle = 'city';
+    const n = Math.floor(Number(c.lifeCount));
+    c.lifeCount = (n >= 2 && n <= 8) ? n : 5;
+    return c;
+  }
+
+  /** 民生版模板池 · 都市日常（默认）。刻意用「本市/城东/老街」这类泛称，不绑具体地名 */
+  const NEWS_LIFE_CITY = [
+    { t: '明日多云转晴', b: '本市明日多云转晴，气温 14~22℃，早晚温差大。气象台提醒：晨间出行注意添衣。' },
+    { t: '城东片区停水通知', b: '城东片区管网改造，本周四 9:00 至 17:00 停水，请沿线居民提前储水。' },
+    { t: '公交遗落公文包', b: '昨日 3 路公交车上遗落一只棕色公文包，内有重要证件。拾到者请联系失主，必有重谢。' },
+    { t: '老街面馆重新开张', b: '老街转角的面馆今日重新开张，老板还是原来那位，招牌牛肉面价格没变，老主顾们可以去坐坐。' },
+    { t: '讣告', b: '本市退休教师因病于家中辞世，享年七十八岁。执教四十载，桃李满城。遵照遗愿，丧事从简。' },
+    { t: '两室一厅出租', b: '市中心两室一厅出租，交通便利，家电齐全，月租面议。有意者请于工作时间联系。' },
+    { t: '城南仓库招夜班', b: '城南物流仓库招夜班分拣员若干，日结，不限经验，可长期。夜班补贴另计。' },
+    { t: '本报副刊今起连载', b: '本报副刊长篇《长夜将明》今日开篇，此后每日一载，敬请读者留意。' },
+    { t: '寻犬启事', b: '爱犬「豆豆」于三日前走失，棕色小型犬，项圈系有铃铛，怕生。寻回者定有重谢。' },
+    { t: '图书馆招募志愿者', b: '市图书馆招募周末整理志愿者，提供餐食与志愿证明，欢迎学生报名。' },
+    { t: '老桥封闭维修', b: '老桥下月起封闭维修，工期两个月。来往车辆请提前规划绕行路线，高峰时段预计拥堵。' },
+    { t: '市医院增设夜间窗口', b: '市医院自本周起在急诊区增设夜间加号窗口，缓解夜间排队，晚间就诊可提前电话确认。' },
+    { t: '本周粮价平稳', b: '据市场巡查，本周粮油价格平稳，蔬果供应充足，局部品种小幅回落。' },
+    { t: '失物招领', b: '环卫工人在中心广场长椅处拾得银灰色手包一只，已交至市政服务大厅，请失主持有效证件认领。' },
+    { t: '周末集市恢复', b: '因连日阴雨暂停的周末集市本周恢复，摊位照旧，新增手作与旧书区域。' },
+    { t: '夜间施工提示', b: '环城路夜间铺装施工持续至月底，施工时段（23:00-05:00）请附近居民关窗休息。' },
+  ];
+
+  /** 民生版模板池 · 奇幻（世界观不是现代都市时用这套，避免「停水通知」出戏） */
+  const NEWS_LIFE_FANTASY = [
+    { t: '明日有浮尘雨', b: '明日午后有零星浮尘雨，落尘带微光，沾衣难洗。出门宜遮面，晾晒者请留意。' },
+    { t: '公会招募护卫', b: '冒险者公会城南分会招募临时护卫，护送商队往返北路。报酬从优，需自备兵器。' },
+    { t: '遗失铜制罗盘', b: '某修士于集市遗失铜制罗盘一枚，盘面刻星辰纹，为其师门信物。拾到者归还，必有重谢。' },
+    { t: '城东异响悬赏', b: '城东近郊夜间屡有异响，居民不安。凡查明缘由者，赏银十枚；若能除此患，另议。' },
+    { t: '北门宵禁通告', b: '北门自今夜起宵禁，日出启门。持通行令者不受此限，违者依律问处。' },
+    { t: '桥头杂货铺新货', b: '桥头杂货铺新到南方茶叶与长明蜡烛一批，价廉物美，量少者先到先得。' },
+    { t: '讣告', b: '老铁匠于铺中安然离世，享年七十有二。一生锻打不辍，同行将为其守炉一夜，送行。' },
+    { t: '车行招看棚人', b: '车行招夜班看棚人一名，包食宿，要求胆大心细。夜间只管看马，不问其余。' },
+    { t: '副刊连载启幕', b: '本报副刊《月下纪事》今日开篇，记边地风物与旧年旧事，此后逐日刊出。' },
+    { t: '走失信枭', b: '走失灰羽信枭一只，左爪系红绳，能传短讯，性驯。寻回者重谢，它认得回家的路。' },
+    { t: '药铺施汤', b: '城中药铺今起免费施送驱寒汤，老幼优先。近日寒潮，体弱者勿强撑。' },
+    { t: '城南旧井勿取', b: '城南旧井近日水味发苦，暂勿取用。市政已取样验看，结果不日公布。' },
+    { t: '学院招募短工', b: '学院藏书阁招募短工整理卷册，识字者优先，按日计酬，可管一餐。' },
+    { t: '本旬大集如期', b: '本旬大集如期开市，新增异邦商旅摊位，奇货可寻。市集维持三日，闭市前一日最热闹。' },
+    { t: '夜巡加强告示', b: '近来城郊夜路不靖，巡卫已加强夜班。夜行者请结伴，勿走偏僻小径。' },
+    { t: '驿站寻人', b: '西驿栈房有一旅人滞留数日，自称等人接引却未留姓名。知其来历者请告知驿丞。' },
+  ];
+
+  /** 民生版条目池：按 config.news.lifeStyle 取（city 都市 / fantasy 奇幻 / off 关闭） */
+  function newsLifePick(n, style) {
+    const pool = style === 'fantasy' ? NEWS_LIFE_FANTASY : NEWS_LIFE_CITY;
+    const left = pool.slice();
+    const out = [];
+    const cnt = Math.max(0, Math.min(Math.floor(Number(n) || 0), left.length));
+    for (let i = 0; i < cnt; i++) {
+      const k = Math.floor(Math.random() * left.length);
+      out.push(left.splice(k, 1)[0]);
+    }
+    return out.map((it) => ({ id: uid(), title: it.t, body: it.b }));
+  }
+
+  /** 单条归一化（四个版面共用：缺字段补空，防 AI 少给字段导致渲染崩） */
+  function newsNormItem(x) {
+    if (!x || typeof x !== 'object') return null;
+    return {
+      id: String(x.id || uid()),
+      title: String(x.title || '').slice(0, 80),
+      body: String(x.body || '').slice(0, 1200),
+      who: String(x.who || '').slice(0, 60),
+      target: String(x.target || '').slice(0, 24),
+      headline: String(x.headline || '').slice(0, 80),
+      reason: String(x.reason || '').slice(0, 160),
+      impact: Math.round(clampNum(x.impact, -15, 15, 0) * 10) / 10,
+      days: Math.max(0, Math.floor(Number(x.days) || 0)),
+      date: String(x.date || '').slice(0, 24),
+      filed: x.filed === true,
+      memed: x.memed === true,
+    };
+  }
+
+  /** 一期报纸归一化 */
+  function newsNormIssue(x) {
+    const arr = (v) => (Array.isArray(v) ? v.map(newsNormItem).filter(Boolean).slice(0, 8) : []);
+    const mh = (x.masthead && typeof x.masthead === 'object') ? x.masthead : {};
+    return {
+      id: String(x.id || uid()),
+      no: Math.max(1, Math.floor(Number(x.no) || 1)),
+      date: String(x.date || '').slice(0, 24),
+      ts: Number(x.ts) || Date.now(),
+      source: x.source === 'ai' ? 'ai' : 'local',
+      masthead: {
+        name: String(mh.name || '').slice(0, 20),
+        headline: String(mh.headline || '').slice(0, 80),
+        lead: String(mh.lead || '').slice(0, 300),
+      },
+      front: newsNormItem(x.front),
+      finance: arr(x.finance),
+      life: arr(x.life),
+      chance: arr(x.chance),
+      clips: Array.isArray(x.clips) ? x.clips.map((s) => String(s)).slice(0, 80) : [],
+    };
+  }
+
+  function loadNews() {
+    const raw = pickKeyed(K_NEWS, chatKey());
+    session.newsIssues = raw.filter((x) => x && typeof x === 'object').map(newsNormIssue);
+  }
+  function saveNews() { saveKeyed(K_NEWS, chatKey(), session.newsIssues, TRIM_NEWS); }
+
+  /** 追加一期（新刊排最前；期号自动接上一期 +1） */
+  function newsAdd(issue) {
+    const list = session.newsIssues || (session.newsIssues = []);
+    const it = newsNormIssue(issue || {});
+    it.no = Math.max(1, Number(issue && issue.no) || ((list[0] && list[0].no) || 0) + 1);
+    it.ts = Date.now();
+    list.unshift(it);
+    const cap = storageCap('news', TRIM_NEWS);
+    if (list.length > cap) list.splice(cap, list.length - cap);
+    saveNews();
+    return it;
+  }
+
+  function newsDel(id) {
+    const list = session.newsIssues || [];
+    const i = list.findIndex((x) => x.id === String(id));
+    if (i < 0) return false;
+    list.splice(i, 1);
+    saveNews();
+    return true;
+  }
+
+  /** 剪报：按条目 id 收藏 / 取消收藏 */
+  function newsToggleClip(issueId, itemId) {
+    const it = (session.newsIssues || []).find((x) => x.id === String(issueId));
+    if (!it) return false;
+    const key = String(itemId);
+    const i = it.clips.indexOf(key);
+    if (i >= 0) it.clips.splice(i, 1); else it.clips.push(key);
+    saveNews();
+    return i < 0;
+  }
+
+  /** 剪报条目汇总（跨期，按时间倒序）：供剪报页渲染 */
+  function newsClipped() {
+    const out = [];
+    (session.newsIssues || []).forEach((it) => {
+      ['front', 'finance', 'life', 'chance'].forEach((k) => {
+        const raw = k === 'front' ? (it.front ? [it.front] : []) : it[k];
+        (raw || []).forEach((e) => {
+          if (it.clips.indexOf(e.id) >= 0) out.push({ issue: it, key: k, item: e });
+        });
+      });
+    });
+    return out;
+  }
+
+  /** 找一期里任意条目（含 front / finance / life / chance），供剪报按钮反查 */
+  function newsFindItem(issue, itemId) {
+    if (!issue) return null;
+    if (issue.front && issue.front.id === itemId) return { key: 'front', item: issue.front };
+    const keys = ['finance', 'life', 'chance'];
+    for (let i = 0; i < keys.length; i++) {
+      const arr = issue[keys[i]] || [];
+      for (let j = 0; j < arr.length; j++) if (arr[j].id === itemId) return { key: keys[i], item: arr[j] };
+    }
+    return null;
+  }
+
+
   // ========================= 贴吧 =========================
 
   function loadTieba() {
@@ -4174,8 +4418,19 @@
       price: Math.round(Number(s.price) * 100) / 100,
       prevClose: Math.round(Number(s.prevClose != null ? s.prevClose : s.price) * 100) / 100,
       volatility: clampNum(s.volatility, 0.005, 0.12, 0.03),
-      history: Array.isArray(s.history) ? s.history
-        .filter((n) => isFinite(Number(n))).slice(-40).map((n) => Math.round(Number(n) * 100) / 100) : [],
+      // ⑳ K 线：[{o,h,l,c}]；旧档数字收盘序列 → 每点转四值同构平盘蜡烛
+      history: (Array.isArray(s.history) ? s.history : [])
+        .slice(-41).map((n) => {
+          if (n && typeof n === 'object') {
+            const o = Math.round(Number(n.o != null ? n.o : n.c) * 100) / 100;
+            const c = Math.round(Number(n.c != null ? n.c : n.o) * 100) / 100;
+            const hi = Math.round(Number(n.h != null ? n.h : Math.max(o, c)) * 100) / 100;
+            const lo = Math.round(Number(n.l != null ? n.l : Math.min(o, c)) * 100) / 100;
+            return { o: o, h: hi, l: lo, c: c };
+          }
+          const v = Math.round(Number(n) * 100) / 100;
+          return isFinite(v) ? { o: v, h: v, l: v, c: v } : null;
+        }).filter(Boolean),
     })) : [];
     const holdings = {};
     const hraw = (d.holdings && typeof d.holdings === 'object' && !Array.isArray(d.holdings)) ? d.holdings : {};
@@ -4228,6 +4483,23 @@
       reviewDay: Math.max(0, Math.floor(Number(d.reviewDay) || 0)),     // 复盘点评已使用的交易日（每日限 1 次）
       alerted: Math.round(clampNum(d.alerted, -100, 100, 0)),           // 浮亏提醒已触达的档位（-10/-20/-30）
       brokerOn: d.brokerOn !== false,                                   // 券商短信开关，默认开
+      // —— ⑫㉑⑳ v2 新增：内幕待应验 / 综合指数 / 战绩记忆水位 ——
+      tips: Array.isArray(d.tips) ? d.tips.filter((t) => t && typeof t === 'object').slice(0, 20).map((t) => ({
+        id: String(t.id || uid()), ts: Number(t.ts) || Date.now(),
+        who: String(t.who || '').slice(0, 24), target: String(t.target || '').slice(0, 24),
+        line: String(t.line || '').slice(0, 60),
+        impact: Math.round(clampNum(t.impact, -25, 25, 0) * 10) / 10,
+        reliable: t.reliable === true,
+        dueDay: Math.max(0, Math.floor(Number(t.dueDay) || 0)),
+        resolved: t.resolved === true,
+      })) : [],
+      indexBase: Math.max(0, Number(d.indexBase) || 0),                 // 综合指数基期（Σ建池价×100）
+      index: Math.max(0, Math.round((Number(d.index) || 0) * 100) / 100),
+      prevIndex: Math.max(0, Math.round((Number(d.prevIndex) || 0) * 100) / 100),
+      indexHistory: Array.isArray(d.indexHistory) ? d.indexHistory
+        .filter((n) => isFinite(Number(n))).slice(-40).map((n) => Math.round(Number(n) * 100) / 100) : [],
+      lastMemTs: Math.max(0, Number(d.lastMemTs) || 0),                 // 战绩记忆冷却水位
+      lastMemTotal: Math.max(0, Math.round((Number(d.lastMemTotal) || 0) * 100) / 100),
     };
   }
 
@@ -5408,6 +5680,7 @@
       else if (t === 'profiles') renderProfiles(el);
       else if (t === 'game') renderGame(el);
       else if (t === 'stock') renderStock(el);
+      else if (t === 'news') renderNews(el);
       else if (t === 'theater') renderTheater(el);
       else if (t === 'status') renderStatus(el);
       else if (t === 'music') renderMusic(el);
@@ -5547,6 +5820,7 @@
     { id: 'tieba',   label: '贴吧',     fn: (s) => tbAiGen(s) },
     { id: 'rednote', label: '小红书',   fn: (s) => rnAiGen(s) },
     { id: 'x',       label: 'X',        fn: (s) => xAiGen(s) },
+    { id: 'news',    label: '报纸出版', fn: (s) => npUpdateAuto(s) },
     { id: 'status',  label: '状态栏',   fn: function(s) { return refreshStatus(s); } },
     { id: 'gacha',   label: '金钱提取', fn: (s) => gachaExtractAuto(s) },
     { id: 'stock',   label: '股市推进', fn: (s) => stockAdvanceDay(s) },   // 本地模拟，零 token，只推进交易日
@@ -7905,6 +8179,186 @@ function socialCssRules() {
       '  background: transparent; color: var(--tph-dim); cursor: pointer; border-radius: var(--tph-rad-sm);',
       '  display: inline-flex; align-items: center; justify-content: center; transition: color .14s, background .14s; }',
       '.tph-cal-event-del:hover, .tph-cal-event-edit:hover { color: var(--tph-text); background: var(--tph-hover); }',
+
+      // ========================= 报纸 =========================
+      // 视觉语言：一整套「纸与墨」的局部变量域（.tph-np-paper），把报纸页从 App 的通用
+      // 卡片体系里摘出来 —— 圆角、阴影、渐变一律不用。印刷品的美感来自三件事：
+      //   ① 秩序：字号只有三档（刊名/标题/正文），每档只差一点，靠粗细与字距拉开
+      //   ② 对比：粗线 vs 细线、反白块 vs 纸面、衬线大字 vs 等宽小注
+      //   ③ 墨色：纸不是纯白，墨不是纯黑；红绿用在行情上，别处一律不动用彩色
+      // 字体分两路：正文/标题走衬线（Georgia + 宋体族），期号/日期/发布者走等宽（像排版附注）。
+
+      // —— 纸与墨：局部变量域挂在 .tph-ui[data-app="news"] 上（不是内容区）——
+      // 必须挂到根上，顶栏才能共用同一套纸色；挂内容区的话顶栏是兄弟节点、取不到变量。
+      '.tph-ui[data-app="news"] {',
+      '  --np-paper: #f6f3ea; --np-ink: #24211b; --np-soft: #5d5648; --np-faint: #8d8577;',
+      '  --np-rule: rgba(36,33,27,.20); --np-rule-2: rgba(36,33,27,.58);',
+      '  --np-up: #c62b2f; --np-down: #1c8a4a; --np-star: #b8842a;',
+      '  --np-serif: Georgia, "Songti SC", "SimSun", "Noto Serif SC", serif;',
+      '  --np-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }',
+      // 深色主题 = 夜报：纸变成暖炭色而不是纯黑（纯黑压不住墨，会糊成一片）
+      '.tph-root[data-theme="dark"] .tph-ui[data-app="news"],',
+      '.tph-inline[data-theme="dark"] .tph-ui[data-app="news"] {',
+      '  --np-paper: #1a1917; --np-ink: #ece7dc; --np-soft: #a8a091; --np-faint: #746d61;',
+      '  --np-rule: rgba(236,231,220,.17); --np-rule-2: rgba(236,231,220,.50);',
+      '  --np-up: #ff6b6b; --np-down: #4ecf82; --np-star: #e0b054; }',
+      // 纸面：内容区铺纸色、走衬线
+      '.tph-np-paper { background: var(--np-paper); color: var(--np-ink);',
+      '  font-family: var(--np-serif); }',
+      // 顶栏也走纸色 —— 冷白/冷黑顶栏压在暖纸上会露出明显的色温断层，像两个东西拼起来
+      '.tph-ui[data-app="news"] .tph-ui-head { background: var(--np-paper); color: var(--np-ink);',
+      '  border-bottom: 3px double var(--np-rule-2); }',
+      '.tph-ui[data-app="news"] .tph-ui-head .tph-ui-title { font-family: var(--np-serif);',
+      '  font-weight: 700; letter-spacing: 2px; }',
+      // 底栏：纸色 + 上单线 + 无彩色 tint，激活态用反白块（像报纸页码签）
+      '.tph-ui[data-app="news"] .tph-ui-foot { background: var(--np-paper);',
+      '  border-top: 1px solid var(--np-rule-2); }',
+      '.tph-ui[data-app="news"] .tph-ui-foot .tph-ui-tab { color: var(--np-faint);',
+      '  font-family: var(--np-serif); font-size: 10.5px; letter-spacing: .8px; }',
+      '.tph-ui[data-app="news"] .tph-ui-foot .tph-ui-tab.on { color: var(--np-paper);',
+      '  background: var(--np-ink); }',
+      '.tph-ui[data-app="news"] .tph-ui-foot .tph-ui-tab.on svg { color: var(--np-paper); }',
+      // 空态：按钮不用系统彩色，用油墨方框
+      '.tph-np-paper .tph-btn.sm.primary { border: 1px solid var(--np-rule-2); border-radius: 0;',
+      '  background: transparent; color: var(--np-ink); font-family: var(--np-serif);',
+      '  font-weight: 700; letter-spacing: 1px; }',
+      '.tph-np-paper .tph-btn.sm.primary:hover { background: var(--np-ink); color: var(--np-paper); }',
+
+      // —— 报头 ——
+      '.tph-np-masthead { padding: 15px 2px 0; text-align: center; }',
+      // 刊名上方一行：期号。等宽小字 + 大字距，报纸「版次」的位置
+      '.tph-np-mh-kicker { font-family: var(--np-mono); font-size: 9.5px; letter-spacing: 3px;',
+      '  color: var(--np-faint); }',
+      // 刊名行：两侧细横线 —— 报头最省事的识别件（不用图片、不用花饰）
+      '.tph-np-mh-row { display: flex; align-items: center; gap: 11px; margin-top: 6px; }',
+      '.tph-np-mh-row::before, .tph-np-mh-row::after { content: ""; flex: 1 1 auto;',
+      '  height: 1px; background: var(--np-rule-2); }',
+      '.tph-np-mh-name { flex: 0 0 auto; font-family: var(--np-serif); font-size: 24px;',
+      '  font-weight: 700; letter-spacing: 5px; text-indent: 5px; line-height: 1.2; color: var(--np-ink); }',
+      '.tph-np-mh-meta { display: flex; flex-wrap: wrap; justify-content: center; gap: 9px;',
+      '  margin-top: 7px; font-family: var(--np-mono); font-size: 9.5px; letter-spacing: 1.2px;',
+      '  color: var(--np-faint); }',
+      '.tph-np-mh-meta > span + span::before { content: "·"; margin-right: 9px; opacity: .6; }',
+      // 三线报头（粗—细）：报纸的分量感全在这几条线的粗细对比上
+      '.tph-np-mh-rule { margin-top: 8px; height: 6px; border-top: 3px solid var(--np-rule-2);',
+      '  border-bottom: 1px solid var(--np-rule-2); }',
+
+      // —— 版面导航：报头下的「叠次」条，点了平滑滚到那一版 ——
+      '.tph-np-nav { display: flex; margin-top: 11px; border-top: 1px solid var(--np-rule);',
+      '  border-bottom: 1px solid var(--np-rule); }',
+      '.tph-np-nav-b { flex: 1 1 0; min-width: 0; padding: 7px 0; box-sizing: border-box;',
+      '  font-family: var(--np-serif); font-size: 11.5px; font-weight: 700; letter-spacing: 1.5px;',
+      '  text-align: center; color: var(--np-soft); background: transparent; border: none;',
+      '  border-right: 1px solid var(--np-rule); cursor: pointer;',
+      '  transition: background .14s, color .14s; }',
+      '.tph-np-nav-b:last-child { border-right: none; }',
+      '.tph-np-nav-b:hover { background: var(--np-ink); color: var(--np-paper); }',
+
+      // —— 头版要闻 ——
+      '.tph-np-lead { padding: 15px 2px 13px; }',
+      '.tph-np-lead-h { font-family: var(--np-serif); font-size: 20px; font-weight: 700;',
+      '  line-height: 1.34; letter-spacing: .8px; color: var(--np-ink); }',
+      '.tph-np-lead-b { margin-top: 9px; font-family: var(--np-serif); font-size: 13.5px;',
+      '  line-height: 1.95; color: var(--np-soft); text-align: justify; }',
+      // 首字下沉：整段的分工是「导语正常排、正文首字下沉」，两条共用类名，靠 .drop 区分
+      '.tph-np-lead-b.drop::first-letter { float: left; margin: 4px 7px 0 0; font-size: 38px;',
+      '  line-height: .88; font-weight: 700; color: var(--np-ink); }',
+      '.tph-np-lead-who { margin-top: 8px; font-family: var(--np-mono); font-size: 9.5px;',
+      '  letter-spacing: .6px; color: var(--np-faint); }',
+
+      // —— 版面头：反白横条（报纸版面头的标准做法，比「◆ + 下划线」有分量得多）——
+      '.tph-np-sec { margin-top: 19px; }',
+      '.tph-np-sec-h { display: flex; align-items: center; justify-content: space-between; gap: 8px;',
+      '  padding: 4px 9px 4px 10px; background: var(--np-ink); color: var(--np-paper); }',
+      '.tph-np-sec-t { font-family: var(--np-serif); font-size: 13px; font-weight: 700;',
+      '  letter-spacing: 3px; text-indent: 3px; }',
+      '.tph-np-sec-c { font-family: var(--np-mono); font-size: 9.5px; letter-spacing: 1px; opacity: .75; }',
+
+      // —— 条目（头版金句 / 财经 / 民生共用）——
+      '.tph-np-item { padding: 12px 2px 9px; border-bottom: 1px solid var(--np-rule); }',
+      '.tph-np-item:last-child { border-bottom: none; padding-bottom: 3px; }',
+      '.tph-np-item-top { display: flex; align-items: baseline; gap: 8px; }',
+      '.tph-np-item-h { flex: 1 1 auto; min-width: 0; font-family: var(--np-serif); font-size: 14.5px;',
+      '  font-weight: 700; line-height: 1.42; letter-spacing: .3px; color: var(--np-ink); }',
+      '.tph-np-item-sub { margin-top: 6px; font-family: var(--np-serif); font-size: 12px;',
+      '  line-height: 1.72; color: var(--np-faint); }',
+      '.tph-np-item-b { margin-top: 6px; font-family: var(--np-serif); font-size: 13px;',
+      '  line-height: 1.86; color: var(--np-soft); text-align: justify; }',
+      '.tph-np-item-who { margin-top: 6px; font-family: var(--np-mono); font-size: 9.5px;',
+      '  letter-spacing: .6px; color: var(--np-faint); }',
+      '.tph-np-item-tag { flex: 0 0 auto; font-family: var(--np-mono); font-size: 10px;',
+      '  letter-spacing: .8px; color: var(--np-faint); }',
+
+      // —— 涨跌：去掉药丸底，改成行情板的「箭头 + 等宽数字」——
+      '.tph-np-chg { flex: 0 0 auto; font-family: var(--np-mono); font-size: 12px; font-weight: 700;',
+      '  letter-spacing: -.3px; font-variant-numeric: tabular-nums; }',
+      '.tph-np-chg::before { font-size: 8px; margin-right: 2px; vertical-align: 1px; }',
+      '.tph-np-chg.up { color: var(--np-up); }',
+      '.tph-np-chg.up::before { content: "▲"; }',
+      '.tph-np-chg.down { color: var(--np-down); }',
+      '.tph-np-chg.down::before { content: "▼"; }',
+      '.tph-np-chg.flat { color: var(--np-faint); }',
+      '.tph-np-chg.flat::before { content: "—"; }',
+
+      // —— 剪报星标（默认压得很暗，不抢正文；收藏后转成油墨金）——
+      '.tph-np-itemfoot { display: flex; justify-content: flex-end; margin-top: 4px; }',
+      '.tph-np-star { width: 24px; height: 22px; padding: 0; box-sizing: border-box;',
+      '  display: inline-flex; align-items: center; justify-content: center;',
+      '  border: none; border-radius: 0; background: transparent;',
+      '  color: var(--np-faint); opacity: .42; cursor: pointer;',
+      '  transition: opacity .15s, color .15s, transform .12s; }',
+      '.tph-np-star:hover { opacity: 1; transform: scale(1.12); }',
+      '.tph-np-star.on { opacity: 1; color: var(--np-star); }',
+
+      // —— 启事条目：报纸的分类广告框（双线边框 + 方形按钮）——
+      '.tph-np-hook { margin-top: 11px; padding: 11px 12px 9px;',
+      '  border: 3px double var(--np-rule-2); }',
+      '.tph-np-hook-btns { display: flex; gap: 8px; margin-top: 10px; }',
+      '.tph-np-hook-btn { flex: 1 1 0; min-width: 0; padding: 7px 8px; box-sizing: border-box;',
+      '  font-family: var(--np-serif); font-size: 12px; font-weight: 700; letter-spacing: 1px;',
+      '  border: 1px solid var(--np-rule-2); border-radius: 0; background: transparent;',
+      '  color: var(--np-ink); cursor: pointer; transition: background .14s, color .14s, border-color .14s; }',
+      '.tph-np-hook-btn:hover { background: var(--np-ink); color: var(--np-paper); border-color: var(--np-ink); }',
+      '.tph-np-hook-btn.on { border-color: var(--np-rule); color: var(--np-faint); }',
+      '.tph-np-hook-btn.on:hover { background: transparent; color: var(--np-faint); border-color: var(--np-rule); }',
+
+      // —— 往期：报纸封面卡（左侧反白期号方块 + 右侧衬线头条）——
+      // 用 flex 拉伸让期号方块与卡片等高 —— 这是「封面」感的来源，比一行列表重得多
+      '.tph-np-issue { display: flex; align-items: stretch; margin-bottom: 11px;',
+      '  border: 1px solid var(--np-rule-2); background: transparent; }',
+      '.tph-np-issue-no { flex: 0 0 auto; width: 46px; display: flex; flex-direction: column;',
+      '  align-items: center; justify-content: center; gap: 1px;',
+      '  background: var(--np-ink); color: var(--np-paper); font-family: var(--np-mono); }',
+      '.tph-np-issue-no b { font-size: 17px; font-weight: 700; line-height: 1; }',
+      '.tph-np-issue-no i { font-size: 7.5px; font-style: normal; letter-spacing: 1.5px; opacity: .72; }',
+      '.tph-np-issue-main { flex: 1 1 auto; min-width: 0; padding: 10px 9px; cursor: pointer; }',
+      '.tph-np-issue-h { font-family: var(--np-serif); font-size: 14px; font-weight: 700;',
+      '  line-height: 1.42; color: var(--np-ink); }',
+      '.tph-np-issue-d { margin-top: 5px; font-family: var(--np-mono); font-size: 9.5px;',
+      '  letter-spacing: .8px; color: var(--np-faint); }',
+      '.tph-np-issue-del { flex: 0 0 auto; width: 32px; padding: 0; box-sizing: border-box;',
+      '  display: inline-flex; align-items: center; justify-content: center;',
+      '  border: none; border-left: 1px solid var(--np-rule); border-radius: 0;',
+      '  background: transparent; color: var(--np-faint); cursor: pointer;',
+      '  transition: color .14s, background .14s; }',
+      '.tph-np-issue-del:hover { background: var(--np-up); color: var(--np-paper); }',
+
+      // —— 回最新 / 页脚 / 剪报来源 ——
+      '.tph-np-latest { display: flex; align-items: center; gap: 8px; margin-bottom: 2px;',
+      '  padding: 7px 9px; border: 1px solid var(--np-rule-2); }',
+      '.tph-np-latest-t { flex: 1 1 auto; min-width: 0; font-family: var(--np-mono);',
+      '  font-size: 10px; letter-spacing: .6px; color: var(--np-faint); }',
+      '.tph-np-latest-btn { flex: 0 0 auto; padding: 4px 10px; box-sizing: border-box;',
+      '  font-family: var(--np-serif); font-size: 11.5px; font-weight: 700; letter-spacing: 1px;',
+      '  border: 1px solid var(--np-rule-2); border-radius: 0; background: transparent;',
+      '  color: var(--np-ink); cursor: pointer; transition: background .14s, color .14s; }',
+      '.tph-np-latest-btn:hover { background: var(--np-ink); color: var(--np-paper); }',
+      '.tph-np-foot { padding: 16px 4px 8px; text-align: center; font-family: var(--np-mono);',
+      '  font-size: 9.5px; letter-spacing: 1.5px; color: var(--np-faint); }',
+      '.tph-np-foot::before { content: "— "; }',
+      '.tph-np-foot::after { content: " —"; }',
+      '.tph-np-clip-src { margin-top: 6px; font-family: var(--np-mono); font-size: 9.5px;',
+      '  letter-spacing: .6px; color: var(--np-faint); }',
   ];
 }
 
@@ -8856,10 +9310,30 @@ function mediaCssRules() {
       '.tph-stk-price.big { font-size: 24px; }',
       '.tph-stk-chg { font-size: 11.5px; font-weight: 700; }',
       '.tph-stk-up { color: #E5484D; } .tph-stk-down { color: #2FB468; } .tph-stk-flat { color: var(--tph-muted); }',
-      '.tph-stk-bars { display: flex; align-items: flex-end; gap: 2px; height: 26px; min-width: 62px; }',
-      '.tph-stk-bar { width: 4px; border-radius: 1px; background: var(--tph-muted); opacity: .5; }',
-      '.tph-stk-chart { display: flex; align-items: flex-end; gap: 3px; height: 110px; padding: 10px 13px; }',
-      '.tph-stk-chart .tph-stk-bar { flex: 1 1 auto; max-width: 10px; }',
+      '.tph-stk-bars { display: flex; align-items: stretch; gap: 2px; height: 26px; min-width: 62px; }',
+      '.tph-stk-chart { display: flex; align-items: stretch; gap: 3px; height: 110px; padding: 10px 13px; }',
+      // ⑳ 蜡烛：影线（细竖条）+ 实体（开→收），红涨绿跌
+      '.tph-stk-candle { position: relative; width: 4px; }',
+      '.tph-stk-chart .tph-stk-candle { flex: 1 1 auto; max-width: 10px; }',
+      '.tph-stk-candle .tph-stk-wick { position: absolute; left: 50%; width: 1px; margin-left: -0.5px;',
+      '  background: var(--tph-muted); opacity: .7; }',
+      '.tph-stk-candle .tph-stk-body { position: absolute; left: 0; width: 100%; border-radius: 1px; }',
+      '.tph-stk-candle.up .tph-stk-body { background: #E5484D; }',
+      '.tph-stk-candle.down .tph-stk-body { background: #2FB468; }',
+      '.tph-stk-candle.up .tph-stk-wick { background: #E5484D; opacity: .55; }',
+      '.tph-stk-candle.down .tph-stk-wick { background: #2FB468; opacity: .55; }',
+      // ⑳ 综合指数条
+      '.tph-stk-index { display: flex; align-items: center; gap: 7px; padding: 9px 13px;',
+      '  border-bottom: 1px solid var(--tph-border); }',
+      '.tph-stk-index-t { font-size: 11px; color: var(--tph-muted); }',
+      '.tph-stk-index-v { font-size: 15px; font-weight: 800; }',
+      '.tph-stk-index-c { font-size: 11.5px; font-weight: 700; }',
+      '.tph-stk-index .tph-stk-bars { margin-left: auto; height: 20px; min-width: 56px; }',
+      // ⑫ 待应验内幕卡
+      '.tph-stk-tip { margin: 6px 13px 0; padding: 8px 10px; border: 1px dashed var(--tph-border);',
+      '  border-radius: var(--tph-rad); background: rgba(127,127,127,.05); }',
+      '.tph-stk-tip-line { font-size: 12.5px; font-weight: 600; color: var(--tph-text); line-height: 1.45; }',
+      '.tph-stk-tip-sub { font-size: 11px; color: var(--tph-muted); margin-top: 3px; }',
       '.tph-stk-empty { font-size: 11px; color: var(--tph-muted); }',
       '.tph-stk-foot { padding: 8px 13px 14px; font-size: 11px; color: var(--tph-muted); text-align: center; }',
       '.tph-stk-detail { padding: 8px 13px; display: flex; flex-direction: column; gap: 4px; }',
@@ -8924,6 +9398,11 @@ function mediaCssRules() {
       { id: 'noti', name: '通知', icon: 'alert' },
       { id: 'dm', name: '私信', icon: 'comment' },
     ],
+    news: [
+      { id: 'read', name: '读报', icon: 'house' },
+      { id: 'past', name: '往期', icon: 'time' },
+      { id: 'clip', name: '剪报', icon: 'star' },
+    ],
   };
 
   /** 各 App 的品牌主色（顶栏、激活态、强调点都用它） */
@@ -8933,6 +9412,7 @@ function mediaCssRules() {
     rednote: '#FF2442',
     x: '#1D9BF0',
     memory: '#FF9F0A',
+    news: '#46536B',
   };
 
   /** 每个列表页的每页条数（无限滚动按这个分页） */
@@ -9804,6 +10284,7 @@ function mediaCssRules() {
     { id: 'tieba', name: '贴吧' },
     { id: 'rednote', name: '小红书' },
     { id: 'x', name: 'X' },
+    { id: 'news', name: '报纸' },
     { id: 'music', name: '音乐' },
     { id: 'storage', name: '自动清理' },
     { id: 'update', name: '更新中心' },
@@ -9817,6 +10298,7 @@ function mediaCssRules() {
     if (id === 'tieba') return secTieba;
     if (id === 'rednote') return secRedNote;
     if (id === 'x') return secX;
+    if (id === 'news') return secNews;
     if (id === 'music') return secMusic;
     if (id === 'storage') return secStorage;
     if (id === 'update') return secUpdate;
@@ -11463,6 +11945,67 @@ function mediaCssRules() {
         notify('已清空 X 数据');
       },
     }, ['清空本聊天 X 数据']));
+    body.appendChild(acts);
+  }
+
+  // ========================= 报纸 =========================
+
+  function secNews(body) {
+    const cfg = newsCfg();
+    body.appendChild(h('div', { class: 'tph-label', text: '报纸' }));
+    body.appendChild(hintNode('报纸是「世界主动向玩家说话」的渠道。头版要闻呼应最近的剧情；'
+      + '财经行情直接影响股价（涨跌停内），并同时进股票 App 的新闻流；'
+      + '启事版的机会可以一键存进日程、写进记忆。民生版由本地模板生成，不消耗 AI。'));
+
+    const row = h('div', { class: 'tph-row' });
+    row.appendChild(h('span', { class: 'tph-label inline', text: '报刊名' }));
+    const inp = h('input', {
+      class: 'tph-input', type: 'text', placeholder: '留空则首次出版由 AI 起名',
+      value: cfg.masthead || '',
+    });
+    inp.addEventListener('change', () => {
+      cfg.masthead = String(inp.value).trim().slice(0, 20);
+      cfgApply();
+    });
+    row.appendChild(inp);
+    body.appendChild(row);
+
+    body.appendChild(h('div', { class: 'tph-label', text: '民生版风格' }));
+    body.appendChild(hintNode('民生版是天气、停水、寻物、讣告这一类日常琐事。世界观不是现代都市的话选「奇幻」，'
+      + '会换成公会招募、悬赏、驿站寻人那一路。'));
+    const chipRow = h('div', { class: 'tph-row', style: 'gap:6px;flex-wrap:wrap;margin:8px 0' });
+    [['city', '都市'], ['fantasy', '奇幻'], ['off', '不要民生版']].forEach((p) => {
+      formChip(chipRow, p[1], cfg.lifeStyle === p[0], () => { cfg.lifeStyle = p[0]; cfgApply(); });
+    });
+    body.appendChild(chipRow);
+
+    if (cfg.lifeStyle !== 'off') {
+      body.appendChild(h('div', { class: 'tph-label', text: '民生版每期条数' }));
+      const num = h('input', {
+        class: 'tph-input', type: 'number', min: '2', max: '8', value: String(cfg.lifeCount),
+      });
+      num.addEventListener('change', () => {
+        cfg.lifeCount = clampNum(Number(num.value), 2, 8, 5);
+        cfgApply();
+      });
+      body.appendChild(num);
+    }
+
+    body.appendChild(h('div', { class: 'tph-sep' }));
+    body.appendChild(h('div', { class: 'tph-hint', text: '当前聊天已有 ' + (session.newsIssues || []).length + ' 期报纸。' }));
+    body.appendChild(hintNode('想让报纸跟着「更新中心」自动出版，去「功能 → 更新中心」勾选「报纸出版」。'
+      + '每出版一期消耗一次 AI 调用，默认不勾选。'));
+    const acts = h('div', { class: 'tph-actions' });
+    acts.appendChild(h('button', {
+      class: 'tph-btn danger sm', type: 'button',
+      onclick: () => {
+        if (!HW.confirm('清空当前聊天的全部报纸？不可恢复。')) return;
+        session.newsIssues = [];
+        saveNews();
+        renderScreen();
+        notify('已清空报纸数据');
+      },
+    }, ['清空本聊天报纸数据']));
     body.appendChild(acts);
   }
 
@@ -24785,6 +25328,12 @@ function mediaCssRules() {
   // —— ⑰ 券商会话名（建好后可在微信里手动改名） ——
   const STK_BROKER_NAME = '环球证券';
 
+  // —— ⑳ 涨跌停 ±10%（相对当日基准价 prevClose；所有改价统一走 stockApplyMove） ——
+  const STK_LIMIT = 0.10;
+
+  // —— ㉑ 战绩记忆防刷：同一冷却窗内不重复写「炒股大赚/巨亏」记忆 ——
+  const STK_MEM_COOLDOWN = 5 * 60 * 1000;
+
   /** ① 单笔交易费用：佣金（万2.5，最低 ¥5）+ 印花税（仅卖出，万5） */
   function stockFee(amount, isSell) {
     const amt = Math.max(0, Number(amount) || 0);
@@ -24840,6 +25389,57 @@ function mediaCssRules() {
     return session.stock;
   }
 
+  /** ⑳ 当日 K 线（history 末根；缺失则按当前价补一根平盘；旧档数字双保险转换） */
+  function stockBar(s) {
+    if (!Array.isArray(s.history) || !s.history.length) {
+      const p = s.price;
+      s.history = [{ o: p, h: p, l: p, c: p }];
+    }
+    const last = s.history[s.history.length - 1];
+    if (typeof last === 'number') {
+      const bar = { o: last, h: last, l: last, c: last };
+      s.history[s.history.length - 1] = bar;
+      return bar;
+    }
+    return last;
+  }
+
+  /**
+   * ⑳ 统一价格变动入口：涨跌停 clamp（相对当日基准 prevClose）+ 更新当日 K 线。
+   * 随机游走 / 新闻 / 内幕 / 黑天鹅全部走这里；返回相对基准的实际涨跌百分比（含日内累计）。
+   * 日内冲击不移动 prevClose——当日涨跌停基准不漂移。
+   */
+  function stockApplyMove(s, pct) {
+    const base = Number(s.prevClose) || s.price;
+    const hi = Math.max(0.5, stockRound2(base * (1 + STK_LIMIT)));
+    const lo = Math.max(0.5, stockRound2(base * (1 - STK_LIMIT)));
+    let next = stockRound2(s.price * (1 + (Number(pct) || 0)));
+    if (next > hi) next = hi;
+    if (next < lo) next = lo;
+    if (next === s.price) return 0;
+    s.price = next;
+    const bar = stockBar(s);
+    bar.c = next;
+    bar.h = Math.max(bar.h, next);
+    bar.l = Math.min(bar.l, next);
+    return base > 0 ? (next - base) / base * 100 : 0;
+  }
+
+  /** ⑳ 综合指数：全池等权（每只 100 股）加权，建池时基期 1000 点 */
+  function stockIndexCalc() {
+    const d = stockData();
+    if (!d.pool.length) return 0;
+    const sum = d.pool.reduce((n, s) => n + s.price * 100, 0);
+    if (!d.indexBase) {
+      d.indexBase = sum;
+      d.index = 1000;
+      if (!Array.isArray(d.indexHistory) || !d.indexHistory.length) d.indexHistory = [1000];
+      return 1000;
+    }
+    d.index = stockRound2(sum / d.indexBase * 1000);
+    return d.index;
+  }
+
   /** 本地兜底股票池（AI 不可用 / 演示模式 / 冒烟测试） */
   function stockLocalPool() {
     const tpl = [
@@ -24856,10 +25456,16 @@ function mediaCssRules() {
     d.pool = tpl.map((t) => ({
       code: t[1], name: t[0], sector: t[2], desc: t[3],
       price: t[4], prevClose: t[4], volatility: t[5],
-      history: [stockRound2(t[4] * 0.96), stockRound2(t[4] * 0.98), t[4]],
+      history: [
+        { o: stockRound2(t[4] * 0.96), h: t[4], l: stockRound2(t[4] * 0.96), c: stockRound2(t[4] * 0.98) },
+        { o: stockRound2(t[4] * 0.98), h: t[4], l: stockRound2(t[4] * 0.98), c: t[4] },
+      ],
     }));
     d.day = 1;
     d.news = [];
+    d.tips = [];
+    d.indexBase = 0;
+    stockIndexCalc();
     saveStock();
     return d.pool;
   }
@@ -24878,7 +25484,7 @@ function mediaCssRules() {
       desc: String(s.desc || '').slice(0, 120),
       price: p, prevClose: p,
       volatility: Math.min(0.12, Math.max(0.005, Number(s.volatility) || 0.03)),
-      history: [],
+      history: [{ o: p, h: p, l: p, c: p }],
     };
   }
 
@@ -24897,6 +25503,9 @@ function mediaCssRules() {
       d.pool = pool;
       d.day = 1;
       d.news = [];
+      d.tips = [];
+      d.indexBase = 0;
+      stockIndexCalc();
       saveStock();
       return pool;
     } catch (e) {
@@ -24934,10 +25543,10 @@ function mediaCssRules() {
     const mkt = gauss(rng) * 0.008 + stockLuckBias();
     d.pool.forEach((s) => {
       const chg = mkt + gauss(rng) * (s.volatility || 0.03);
-      s.prevClose = s.price;
-      s.price = Math.max(0.5, stockRound2(s.price * (1 + chg)));
-      s.history.push(s.price);
-      if (s.history.length > 40) s.history.splice(0, s.history.length - 40);
+      stockApplyMove(s, chg);                       // ⑳ 涨跌停内收盘 + 更新当日 K 线
+      s.prevClose = s.price;                        // 收盘价定为明日的涨跌停基准
+      s.history.push({ o: s.price, h: s.price, l: s.price, c: s.price });   // ⑳ 开新一日蜡烛
+      if (s.history.length > 41) s.history.splice(0, s.history.length - 41);
     });
     d.day++;
     // ② T+1：跨交易日后，此前买入被冻结的股数全部解冻
@@ -24945,6 +25554,14 @@ function mediaCssRules() {
       const h = d.holdings[k];
       if (h.buyDay < d.day) h.lockedShares = 0;
     });
+    // ⑫ 兑现到期的内幕（应验 / 谣言反转）
+    stockResolveTips();
+    // ⑳ 指数收盘
+    d.prevIndex = d.index;
+    stockIndexCalc();
+    if (!Array.isArray(d.indexHistory)) d.indexHistory = [];
+    d.indexHistory.push(d.index);
+    if (d.indexHistory.length > 40) d.indexHistory = d.indexHistory.slice(-40);
     // ⑱ 浮亏跨档提醒：只在「亏得更深」时推一次券商消息，避免每天重复刷屏
     const lv = stockLossLevel();
     if (lv === 0) {
@@ -24953,6 +25570,8 @@ function mediaCssRules() {
       d.alerted = -lv;
       stockSms('【风险提示】您的账户浮动亏损已超过 ' + lv + '%（当前第 ' + d.day + ' 个交易日），请注意风险控制。');
     }
+    // ㉑ 资产里程碑（翻倍 / 腰斩写记忆）
+    stockMilestoneCheck();
     saveStock();
     return true;
   }
@@ -24997,11 +25616,9 @@ function mediaCssRules() {
         if (!item.headline || !item.target) return;
         const s = stockByTarget(d, item.target);
         if (s) {
-          // 突发新闻：即时冲击现价（作为当日新基准），并计入走势
-          s.prevClose = s.price;
-          s.price = Math.max(0.5, stockRound2(s.price * (1 + item.impact / 100)));
-          s.history.push(s.price);
-          if (s.history.length > 40) s.history.splice(0, s.history.length - 40);
+          // ⑳ 突发新闻：即时冲击（涨跌停内、当日基准不漂移），并计入当日 K 线
+          const real = stockApplyMove(s, item.impact / 100);
+          item.impact = Math.round(real * 10) / 10;
           item.target = s.name;   // 对齐成池内正式名
           applied++;
         }
@@ -25009,6 +25626,7 @@ function mediaCssRules() {
       });
       if (!arr.length) throw new Error('没有解析到新闻');
       if (d.news.length > 60) d.news = d.news.slice(0, 60);
+      stockIndexCalc();
       saveStock();
       if (!applied) notify('新闻已发布（未命中股票池）', 'info');
       return true;
@@ -25017,6 +25635,38 @@ function mediaCssRules() {
       notify('新闻生成失败：' + ((e && e.message) || 'AI 无响应'), 'error');
       return false;
     }
+  }
+
+  /**
+   * 报纸财经版结算：把报纸给的财经条目落到股价上。
+   * items: [{ target, headline, impact, reason }]（impact 是 AI 给的冲击百分比）
+   * 返回实际生效的 [{ target, impact }]，impact 已被涨跌停截断成真实涨跌幅 ——
+   * 报纸要用返回值回写展示，否则报纸上写的涨幅和实际盘面会对不上。
+   */
+  function stockNewsApply(items) {
+    const d = stockData();
+    const out = [];
+    if (!d.pool.length || !Array.isArray(items)) return out;
+    const fresh = [];
+    items.slice(0, 6).forEach((n) => {
+      if (!n || typeof n !== 'object') return;
+      const headline = String(n.headline || '').trim().slice(0, 80);
+      const s = stockByTarget(d, String(n.target || '').trim().slice(0, 24));
+      if (!s || !headline) return;
+      const real = stockApplyMove(s, clampNum(n.impact, -15, 15, 0) / 100);
+      const impact = Math.round(real * 10) / 10;
+      fresh.push({
+        ts: Date.now(), target: s.name, headline: headline,
+        impact: impact, reason: String(n.reason || '').slice(0, 160), tag: 'paper',
+      });
+      out.push({ target: s.name, impact: impact });
+    });
+    if (!fresh.length) return out;
+    d.news.unshift.apply(d.news, fresh);   // 一次插入，保持报纸里的条目顺序（逐条 unshift 会倒过来）
+    if (d.news.length > 60) d.news = d.news.slice(0, 60);
+    stockIndexCalc();
+    saveStock();
+    return out;
   }
 
   /** 买入：① 含手续费；② 当日买入部分进 T+1 冻结。钱包共用命运抽卡那一本账 */
@@ -25095,6 +25745,8 @@ function mediaCssRules() {
       + '。本次盈亏 ' + (pnl >= 0 ? '+' : '') + pnl + '。');
     notify('卖出 ' + s.name + ' ×' + shares + ' 股，回款 ¥' + gain + '（含费 ¥' + fee + '）'
       + '，本次盈亏 ' + (pnl >= 0 ? '+' : '') + pnl, pnl >= 0 ? 'success' : 'warning');
+    // ㉑ 大额盈亏写入记忆区，让炒股战绩成为剧情的一部分
+    stockWriteMemory(s, shares, pnl);
     return true;
   }
 
@@ -25158,7 +25810,8 @@ function mediaCssRules() {
         + (p.list.length > 4 ? ' 等共' + p.list.length + '只' : '')
       : '空仓';
     let out = '【炒股账户（主角用手机炒股的实况，剧情可引用）】\n'
-      + '第' + p.day + '个交易日；持仓：' + holdTxt
+      + '第' + p.day + ' 个交易日；指数 ' + (d.index || 1000)
+      + '；持仓：' + holdTxt
       + '；总资产 ¥' + p.total
       + '；累计已实现盈亏 ' + (p.realized >= 0 ? '+' : '') + p.realized;
     // ⑱ 浮亏情绪：把账户压力写进上下文，引导角色自然地表现出焦虑 / 想翻本
@@ -25176,37 +25829,75 @@ function mediaCssRules() {
     return out;
   }
 
-  /** ⑫ 内幕消息：AI 生成一条贴合剧情的未公开情报，即时冲击目标股价（每交易日限 1 次，impact ±25） */
-  async function stockGenInsider() {
+  /**
+   * ⑫ 内幕消息（v2 升级：找角色打听）：AI 以「{{who}}」的身份/口吻给出一条消息，
+   * 可靠与否由 AI 按角色身份判定（reliable 对玩家保密）；1~3 个交易日后兑现——
+   * 应验按 impact 冲击，谣言按 -impact 反向收割（涨跌停内）。每交易日限 1 次。
+   * 兼容旧版即时格式（AI 只回 headline 无 line 时走即时冲击）。
+   */
+  async function stockGenInsider(who) {
     const d = stockData();
     if (!d.pool.length) { notify('还没有股票池，先打开股票App生成', 'warning'); return false; }
     if (d.day > 0 && d.insiderDay === d.day) {
       notify('今天的内幕消息已经用过了，等下一个交易日', 'warning');
       return false;
     }
+    let name = String(who || '').trim().slice(0, 24);
+    if (!name && typeof wxCandidates === 'function') {
+      const cand = wxCandidates() || [];
+      if (cand.length) name = String(cand[0]).slice(0, 24);
+    }
+    if (!name) name = '神秘线人';
     try {
       const ctx = await storyContext();
+      let profile = '';
+      try {
+        const p = (typeof profileByName === 'function') ? profileByName(name) : null;
+        if (p) profile = buildProfileContext([p]);
+      } catch (_e) { /* 无档案不影响 */ }
       const market = d.pool.map((s) => s.name + '（' + s.sector + '）¥' + s.price).join('、');
-      const prompt = fillVars(promptText('stockInsiderGen'), { context: ctx, market: market });
+      const prompt = fillVars(promptText('stockInsiderGen'), { who: name, profile: profile, context: ctx, market: market });
       const resp = await llm(prompt, '内幕消息');
       if (!resp) throw new Error('AI 无响应');
       const obj = extractJSON(resp) || {};
+      const line = String(obj.line || '').trim().slice(0, 60);
+      const target = String(obj.target || '').trim().slice(0, 24);
+      const s = stockByTarget(d, target);
+      if (!s) throw new Error('消息没有命中股票池里的股票');
+      if (line) {
+        // v2：延迟兑现型（角色口吻 + 真伪悬念）
+        const tip = {
+          id: uid(),
+          ts: Date.now(),
+          who: name,
+          target: s.name,
+          line: line,
+          impact: Math.round(clampNum(obj.impact, -25, 25, 0) * 10) / 10,
+          reliable: obj.reliable === true,
+          dueDay: d.day + 1 + Math.floor(Math.random() * 3),   // 1~3 个交易日内应验
+          resolved: false,
+        };
+        if (!Array.isArray(d.tips)) d.tips = [];
+        d.tips.unshift(tip);
+        if (d.tips.length > 20) d.tips = d.tips.slice(0, 20);
+        saveStock();
+        d.insiderDay = d.day;
+        stockSms('【私密情报】' + name + '："' + line + '"（' + (tip.dueDay - d.day) + ' 个交易日内见分晓）');
+        notify(name + ' 悄悄说："' + line + '"', 'info');
+        return true;
+      }
+      // 旧版即时型（headline 直击）：兼容自定义过提示词的用户
       const headline = String(obj.headline || '').trim().slice(0, 80);
       if (!headline) throw new Error('AI 没有给出有效消息');
-      const s = stockByTarget(d, String(obj.target || '').trim().slice(0, 24));
-      if (!s) throw new Error('消息没有命中股票池里的股票');
       const impact = Math.round(clampNum(obj.impact, -25, 25, 0));
-      s.prevClose = s.price;
-      s.price = Math.max(0.5, stockRound2(s.price * (1 + impact / 100)));
-      s.history.push(s.price);
-      if (s.history.length > 40) s.history.splice(0, s.history.length - 40);
+      const real = stockApplyMove(s, impact / 100);
       d.news.unshift({
-        ts: Date.now(), target: s.name, headline: headline, impact: impact,
+        ts: Date.now(), target: s.name, headline: headline, impact: Math.round(real * 10) / 10,
         reason: String(obj.reason || '').slice(0, 120), tag: 'insider',
       });
       if (d.news.length > 60) d.news = d.news.slice(0, 60);
-      d.insiderDay = d.day;
       saveStock();
+      d.insiderDay = d.day;
       stockSms('【重大情报】' + s.name + '：' + headline + '（即时影响 ' + (impact >= 0 ? '+' : '') + impact + '%）');
       notify('内幕消息已生效：' + s.name + ' ' + (impact >= 0 ? '+' : '') + impact + '%', 'success');
       return true;
@@ -25215,6 +25906,51 @@ function mediaCssRules() {
       notify('内幕消息获取失败：' + ((e && e.message) || 'AI 无响应'), 'error');
       return false;
     }
+  }
+
+  /** ⑫ 解析 AI 内幕回复 → tip（白名单清洗；测试出口用） */
+  function stockTipParse(who, text) {
+    try {
+      const obj = extractJSON(String(text || ''));
+      if (!obj || typeof obj !== 'object') return null;
+      const line = String(obj.line || '').trim().slice(0, 60);
+      const target = String(obj.target || '').trim().slice(0, 24);
+      if (!line || !target) return null;
+      return {
+        id: uid(), ts: Date.now(), who: String(who || '').slice(0, 24), target: target, line: line,
+        impact: Math.round(clampNum(obj.impact, -25, 25, 0) * 10) / 10,
+        reliable: obj.reliable === true, dueDay: 0, resolved: false,
+      };
+    } catch (_e) {
+      return null;
+    }
+  }
+
+  /** ⑫ 兑现到期内幕：应验按 impact、谣言按 -impact 反向（涨跌停内），转新闻条目并券商通知 */
+  function stockResolveTips() {
+    const d = stockData();
+    if (!Array.isArray(d.tips) || !d.tips.length) return 0;
+    let n = 0;
+    d.tips.forEach((tip) => {
+      if (!tip || tip.resolved || Number(tip.dueDay) > d.day) return;
+      const s = stockByTarget(d, tip.target);
+      if (!s) { tip.resolved = true; return; }
+      const rumor = !tip.reliable;
+      const realPct = stockApplyMove(s, rumor ? -tip.impact : tip.impact);
+      tip.resolved = true;
+      n++;
+      d.news.unshift({
+        ts: Date.now(), target: s.name,
+        headline: (rumor ? '「' + tip.who + '」的消息是谣言：' : '「' + tip.who + '」的内幕应验：') + tip.line,
+        impact: Math.round(realPct * 10) / 10,
+        reason: rumor ? '听信谣言的人被反向收割' : '消息属实，先知先觉者吃到了肉',
+        tag: 'insider',
+      });
+      stockSms('【情报揭晓】' + (rumor ? '谣言：' : '应验：') + s.name + ' '
+        + (Math.round(realPct * 10) / 10) + '%（' + tip.who + ' 的消息）');
+    });
+    if (d.news.length > 60) d.news = d.news.slice(0, 60);
+    return n;
   }
 
   /** ⑭ 复盘点评：AI 以角色口吻点评一句（每交易日最多 1 次，省 token） */
@@ -25249,8 +25985,57 @@ function mediaCssRules() {
     }
   }
 
-  /** ⑮ 黑天鹅事件：AI 制造宏观大事件，一次性冲击全场或指定行业（每交易日限 1 次） */
-  async function stockGenShock() {
+  /** ㉑ 大额盈亏写入记忆区（title+source 去重；冷却窗防刷）——让炒股战绩成为剧情的一部分 */
+  function stockWriteMemory(s, shares, pnl) {
+    try {
+      const d = stockData();
+      const p = stockPortfolio();
+      const threshold = Math.max(1000, p.total * 0.1);
+      if (Math.abs(pnl) < threshold) return false;
+      const now = Date.now();
+      if (d.lastMemTs && now - d.lastMemTs < STK_MEM_COOLDOWN) return false;
+      d.lastMemTs = now;
+      if (!d.lastMemTotal) d.lastMemTotal = p.total;
+      const title = '炒股' + (pnl >= 0 ? '大赚' : '巨亏') + '：' + (pnl >= 0 ? '+' : '') + pnl + '（' + s.name + '）';
+      const content = '主角卖出 ' + s.name + ' ×' + shares + ' 股，单次盈亏 ' + (pnl >= 0 ? '+' : '') + pnl
+        + '；累计已实现盈亏 ' + (d.realized >= 0 ? '+' : '') + d.realized + '，当前总资产 ¥' + p.total + '。';
+      addMemory('event', title, content, API.lastMessageId() || 0, 'auto');
+      saveStock();
+      notify('这笔操作已写进记忆', 'info');
+      return true;
+    } catch (e) {
+      softFail('炒股记忆入档', e);
+      return false;
+    }
+  }
+
+  /** ㉑ 资产里程碑：总资产较上次记录翻倍 / 腰斩时写记忆 */
+  function stockMilestoneCheck() {
+    try {
+      const d = stockData();
+      const p = stockPortfolio();
+      if (!p.total) return false;
+      if (!d.lastMemTotal) { d.lastMemTotal = p.total; return false; }
+      const now = Date.now();
+      if (d.lastMemTs && now - d.lastMemTs < STK_MEM_COOLDOWN) return false;
+      let hit = null;
+      if (p.total >= d.lastMemTotal * 2) hit = '翻倍';
+      else if (p.total <= d.lastMemTotal * 0.5) hit = '腰斩';
+      if (!hit) return false;
+      const from = d.lastMemTotal;
+      d.lastMemTs = now;
+      d.lastMemTotal = p.total;
+      addMemory('event', '炒股资产' + hit + '（总资产 ¥' + p.total + '）',
+        '主角的炒股总资产' + hit + '：从 ¥' + from + ' 变为 ¥' + p.total + '（第' + d.day + '个交易日）。',
+        API.lastMessageId() || 0, 'auto');
+      saveStock();
+      return true;
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  /** ⑮ 黑天鹅事件：AI 制造宏观大事件，一次性冲击全场或指定行业（每交易日限 1 次） */  async function stockGenShock() {
     const d = stockData();
     if (!d.pool.length) { notify('还没有股票池，先打开股票App生成', 'warning'); return false; }
     if (d.day > 0 && d.shockDay === d.day) {
@@ -25277,12 +26062,9 @@ function mediaCssRules() {
         || s.sector.indexOf(scopeRaw) >= 0 || scopeRaw.indexOf(s.sector) >= 0);
       if (!hit.length) throw new Error('事件范围没有匹配到任何股票');
       hit.forEach((s) => {
-        // 行业内个股再叠一层自身扰动，避免整板涨跌幅一模一样
+        // 行业内个股再叠一层自身扰动，避免整板涨跌幅一模一样（⑳ 涨跌停内、更新当日 K 线）
         const local = impact * (0.7 + Math.random() * 0.6);
-        s.prevClose = s.price;
-        s.price = Math.max(0.5, stockRound2(s.price * (1 + local / 100)));
-        s.history.push(s.price);
-        if (s.history.length > 40) s.history.splice(0, s.history.length - 40);
+        stockApplyMove(s, local / 100);
       });
       const scope = isAll ? '全场' : scopeRaw;
       const reason = String(obj.reason || '').slice(0, 120);
@@ -25292,6 +26074,7 @@ function mediaCssRules() {
       if (d.news.length > 60) d.news = d.news.slice(0, 60);
       d.shockDay = d.day;
       saveStock();
+      stockIndexCalc();
       stockSms('【市场快讯】' + name + '：' + headline + '（影响范围：' + scope + ' ' + (impact >= 0 ? '+' : '') + impact + '%）');
       notify('黑天鹅：' + name + '（' + scope + ' ' + (impact >= 0 ? '+' : '') + impact + '%）', impact >= 0 ? 'success' : 'warning');
       return true;
@@ -25311,36 +26094,90 @@ function mediaCssRules() {
   // ===========================================================================
   // 37c. 炒股（股票App）—— 渲染：行情 / 持仓 / 新闻 / 详情 / 设置面板
   // ---------------------------------------------------------------------------
-  // 红涨绿跌（A股习惯）。行情为本地模拟，AI 只在「生成股票池」「AI 新闻」两处按需调用。
+  // 红涨绿跌（A股习惯）。行情为本地模拟（±10% 涨跌停），AI 按需调用：
+  // 股票池 / AI 新闻（呼应剧情）/ 找角色打听内幕（延迟兑现·真伪悬念）/ 黑天鹅 / 复盘。
   // ===========================================================================
 
-  /** 迷你条形图：hist 最近 N 点 → 按高低映射成不同高度的竖条 */
+  /**
+   * 蜡烛图：hist 最近 N 根 {o,h,l,c}（旧档数字自动当平盘蜡烛）。
+   * 每根 = 影线（h→l 全高细条）+ 实体（o→c），红涨绿跌（c≥o 红）；tall=详情大图。
+   */
   function stkBars(hist, tall) {
     const box = h('div', { class: tall ? 'tph-stk-chart' : 'tph-stk-bars' });
-    const arr = (hist || []).slice(tall ? -40 : -12);
-    if (arr.length < 2) {
+    const raw = (hist || []).slice(tall ? -40 : -12);
+    const bars = raw.map((n) => {
+      if (n && typeof n === 'object') {
+        return {
+          o: Number(n.o != null ? n.o : n.c), c: Number(n.c != null ? n.c : n.o),
+          h: Number(n.h != null ? n.h : Math.max(n.o || 0, n.c || 0)),
+          l: Number(n.l != null ? n.l : Math.min(n.o || 0, n.c || 0)),
+        };
+      }
+      const v = Number(n);
+      return isFinite(v) ? { o: v, c: v, h: v, l: v } : null;
+    }).filter(Boolean);
+    if (bars.length < 2) {
       box.appendChild(h('span', { class: 'tph-stk-empty', text: '暂无走势' }));
       return box;
     }
-    const min = Math.min.apply(null, arr);
-    const max = Math.max.apply(null, arr);
+    let min = Infinity;
+    let max = -Infinity;
+    bars.forEach((b) => { min = Math.min(min, b.l); max = Math.max(max, b.h); });
     const span = (max - min) || 1;
-    arr.forEach((v) => {
-      const pct = 10 + Math.round((v - min) / span * 80);
-      box.appendChild(h('span', { class: 'tph-stk-bar', style: 'height:' + pct + '%' }));
+    const pos = (v) => Math.round((v - min) / span * 100);   // 0~100
+    bars.forEach((b) => {
+      const up = b.c >= b.o;
+      const hi = Math.max(pos(b.h), 0);
+      const lo = Math.min(pos(b.l), 100);
+      const oP = Math.min(Math.max(pos(b.o), 0), 100);
+      const cP = Math.min(Math.max(pos(b.c), 0), 100);
+      const candle = h('span', { class: 'tph-stk-candle' + (up ? ' up' : ' down') });
+      // 影线：从最高到最低的细竖条（用 top/height 定位）
+      candle.appendChild(h('i', {
+        class: 'tph-stk-wick',
+        style: 'top:' + (100 - hi) + '%;height:' + Math.max(hi - lo, 1) + '%',
+      }));
+      // 实体：开→收的粗体（最低 1% 保证平盘可见）
+      const bodyTop = Math.max(oP, cP);
+      const bodyH = Math.max(Math.abs(oP - cP), 1);
+      candle.appendChild(h('i', {
+        class: 'tph-stk-body',
+        style: 'top:' + (100 - bodyTop) + '%;height:' + bodyH + '%',
+      }));
+      box.appendChild(candle);
     });
     return box;
   }
 
-  /** 涨跌幅文本 + 颜色类（红涨绿跌） */
+  /** 涨跌幅文本 + 颜色类（红涨绿跌）；|chg|≥9.9% 追加 涨停/跌停 标记 */
   function stkChgNode(price, prevClose) {
     const base = Number(prevClose) || price;
     const pct = base > 0 ? (price - base) / base * 100 : 0;
     const cls = pct > 0.001 ? 'tph-stk-up' : (pct < -0.001 ? 'tph-stk-down' : 'tph-stk-flat');
+    const limitTag = pct >= 9.9 ? ' 涨停' : (pct <= -9.9 ? ' 跌停' : '');
     return h('span', {
       class: 'tph-stk-chg ' + cls,
-      text: (pct > 0 ? '+' : '') + pct.toFixed(2) + '%',
+      text: (pct > 0 ? '+' : '') + pct.toFixed(2) + '%' + limitTag,
     });
+  }
+
+  /** ⑳ 综合指数条：点位 + 当日涨跌%（红涨绿跌），置顶行情页 */
+  function stkIndexBar(d) {
+    const bar = h('div', { class: 'tph-stk-index' });
+    bar.appendChild(h('span', { class: 'tph-stk-index-t', text: '综合指数' }));
+    const idx = Number(d.index) || 1000;
+    const prev = Number(d.prevIndex) || idx;
+    const pct = prev > 0 ? (idx - prev) / prev * 100 : 0;
+    bar.appendChild(h('span', {
+      class: 'tph-stk-index-v ' + (pct > 0.001 ? 'tph-stk-up' : (pct < -0.001 ? 'tph-stk-down' : 'tph-stk-flat')),
+      text: idx.toFixed(2),
+    }));
+    bar.appendChild(h('span', {
+      class: 'tph-stk-index-c ' + (pct > 0.001 ? 'tph-stk-up' : (pct < -0.001 ? 'tph-stk-down' : 'tph-stk-flat')),
+      text: (pct > 0 ? '+' : '') + pct.toFixed(2) + '%',
+    }));
+    bar.appendChild(stkBars(d.indexHistory, false));
+    return bar;
   }
 
   /** 钱包条：余额 + 提取剧情金钱（与命运抽卡共用一本账） */
@@ -25366,6 +26203,7 @@ function mediaCssRules() {
 
   /** 行情列表 */
   function stkMarketView(body, d) {
+    body.appendChild(stkIndexBar(d));   // ⑳ 综合指数置顶
     const acts = h('div', { class: 'tph-stk-actions' });
     const reviewBusy = session.stockBusy === 'review';
     const stepBtn = h('button', {
@@ -25510,27 +26348,62 @@ function mediaCssRules() {
     if (session.stockBusy === 'news') btn.setAttribute('disabled', '');
     acts.appendChild(btn);
 
-    // ⑫ 打探内幕：每交易日限 1 次，impact 可达 ±25%
+    // ⑫ 打探内幕（v2：选一个角色打听，消息 1~3 个交易日后兑现——真伪悬念，谣言会反向收割）
     const insiderUsed = d.day > 0 && d.insiderDay === d.day;
     const insiderBtn = h('button', {
       class: 'tph-btn sm' + (session.stockBusy === 'insider' ? ' busy' : ''), type: 'button',
-      onclick: async () => {
-        if (session.stockBusy) return;
-        session.stockBusy = 'insider';
-        renderScreen();
-        await stockGenInsider();
-        session.stockBusy = null;
-        renderScreen();
+      onclick: () => {
+        if (session.stockBusy || insiderUsed) return;
+        const cand = (typeof wxCandidates === 'function' ? wxCandidates() : []) || [];
+        if (!cand.length) { notify('先在微信/档案里准备一些角色，才有人可打听', 'warning'); return; }
+        const pick = uiPickDrawer({
+          title: '找谁打听内幕？',
+          empty: '还没有候选角色',
+          hint: '每人每天只有一次内幕机会；消息可能应验，也可能是谣言',
+          open: false,
+          summary: () => ({ text: '内幕对象', count: 1 }),
+          onOpen: null,
+        });
+        cand.slice(0, 24).forEach((nm) => {
+          pick.chips.appendChild(formChip(null, String(nm), false, () => {
+            pick.toggle();
+            (async () => {
+              if (session.stockBusy) return;
+              session.stockBusy = 'insider';
+              renderScreen();
+              await stockGenInsider(String(nm));
+              session.stockBusy = null;
+              renderScreen();
+            })();
+          }));
+        });
+        pick.toggle();
       },
     }, [session.stockBusy === 'insider' ? '打探中…' : (insiderUsed ? '今日已打探' : '打探内幕')]);
     if (session.stockBusy === 'insider' || insiderUsed) insiderBtn.setAttribute('disabled', '');
     acts.appendChild(insiderBtn);
     body.appendChild(acts);
 
+    // ⑫ 待应验的内幕（谁是消息源、说了什么、还有几天揭晓）
+    const pending = (Array.isArray(d.tips) ? d.tips : []).filter((t) => t && !t.resolved);
+    if (pending.length) {
+      body.appendChild(h('div', { class: 'tph-stk-sec-t', text: '待应验的内幕' }));
+      pending.slice(0, 5).forEach((t) => {
+        const card = h('div', { class: 'tph-stk-tip' });
+        card.appendChild(h('div', { class: 'tph-stk-tip-line', text: '「' + t.who + '」："' + t.line + '"' }));
+        card.appendChild(h('div', {
+          class: 'tph-stk-tip-sub',
+          text: '→ ' + t.target + ' · 第' + t.dueDay + '个交易日揭晓'
+            + (t.dueDay > d.day ? '（还有 ' + (t.dueDay - d.day) + ' 天）' : '（即将揭晓）'),
+        }));
+        body.appendChild(card);
+      });
+    }
+
     if (!d.news.length) {
       body.appendChild(uiBlank({
         icon: 'trend', title: '还没有新闻',
-        text: 'AI 会按世界观与当前行情写财经新闻，并即时冲击目标股价（±15% 内）',
+        text: 'AI 新闻会呼应剧情冲击股价（±10% 涨跌停内）；找角色打听的内幕会在 1~3 个交易日后揭晓',
         fill: true,
       }));
       return;
@@ -25632,7 +26505,7 @@ function mediaCssRules() {
 
   /** App 内设置面板（齿轮） */
   function stkSettingsView(body, d) {
-    body.appendChild(hintNode('玩法：行情由本地模拟推进（零 token）；买卖收佣金万2.5（单笔最低¥5）与卖出印花税万5，当日买入的股票要等下一个交易日（T+1）才能卖。「AI 新闻」「打探内幕」「制造黑天鹅」会按剧情即时冲击股价；点「下一交易日」收盘后会请 AI 来一句复盘。钱包与命运抽卡共用，持仓摘要（含浮亏情绪）常驻注入 AI。'));
+    body.appendChild(hintNode('玩法：行情本地模拟（零 token），个股 ±10% 涨跌停，K 线与综合指数每日更新。买卖收佣金万2.5（单笔最低¥5）与卖出印花税万5，当日买入 T+1 次日可卖。「AI 新闻」必须呼应剧情；「打听内幕」找角色套话（真伪 1~3 天后揭晓，谣言会反向收割）；「制造黑天鹅」全场/行业冲击；收盘后 AI 角色复盘一句。钱包与命运抽卡共用；大额盈亏和资产翻倍/腰斩会写进记忆，成为剧情的一部分；持仓摘要（含浮亏情绪）常驻注入 AI。'));
 
     // ⑲ 财运加成：来自命运抽卡的特殊记忆卡
     const luckN = stockLuckCount();
@@ -25774,6 +26647,564 @@ function mediaCssRules() {
   }
 
   // ===========================================================================
+  // 39. 报纸（多版面出版物 · 世界主动向玩家说话的渠道）
+  // ---------------------------------------------------------------------------
+  // 与贴吧/小红书（玩家主动发帖）相反：报纸是**世界主动抛信息**。四个版面各绑一个出口，
+  // 不做「只有文本」的装饰品 ——
+  //   · 头版要闻 —— 呼应最近剧情（storyContext）；涉及角色单独列出，可写进记忆
+  //   · 财经行情 —— 出版时经 stockNewsApply 结算股价（±10% 涨跌停内），条目同时进股票 App 新闻流
+  //   · 民生生活 —— 本地模板池随机抽（零 token），只负责世界质感，不过 AI
+  //   · 启事·机会 —— 剧情钩子：一键「存进日程」(calendarAdd) / 「记住它」(addMemory)
+  //
+  // 生成策略：一次 AI 调用只写主线三版（头版/财经/启事）。AI 少给哪版就补模板，
+  // 整次失败就出「本地兜底报纸」—— 保证任何情况下都能读到一期像样的报纸。
+  // 刊名第一次出版由 AI 按世界观起，落 config.news.masthead 固定下来（用户可改）。
+  //
+  // DOM 类名契约（样式见 13e-css-social.js 的 .tph-np-* 段）：
+  //   纸色域：tph-np-paper        ← 挂在内容区上，接管纸色/墨色/线条/字体（定义在 13e 顶部）
+  //   tph-np-masthead / -mh-kicker / -mh-row / -mh-name / -mh-meta / -mh-rule
+  //   tph-np-nav / -nav-b         ← 版面导航条（点击平滑滚到对应版面）
+  //   tph-np-lead / -lead-h / -lead-b / -lead-who
+  //   tph-np-sec / -sec-h / -sec-t / -sec-c
+  //   tph-np-item / -item-top / -item-h / -item-b / -item-who / -item-tag
+  //   tph-np-chg(.up/.down/.flat) ← 涨跌标记（红涨绿跌：箭头 + 等宽数字）
+  //   tph-np-star(.on)            ← 剪报星标
+  //   tph-np-hook / -hook-btns / -hook-btn(.on)
+  //   tph-np-issue / -issue-no / -issue-h / -issue-d / -issue-del
+  //   tph-np-latest / -latest-t / -latest-btn / -foot / -clip-src
+  //   版面锚点：各版面容器挂 data-sec（front/finance/life/chance），导航条按它定位
+  // ===========================================================================
+
+  /** 界面态初始化（都是内存态，不落盘） */
+  function ensureNpState() {
+    if (session.npTab !== 'read' && session.npTab !== 'past' && session.npTab !== 'clip') session.npTab = 'read';
+    if (session.npQuery == null) session.npQuery = '';
+    if (!session.npPage) session.npPage = 1;
+  }
+
+  /** 当前正在读的那一期（session.npViewId 指定；没指定或已删就是最新一期） */
+  function npCurrent() {
+    const list = session.newsIssues || [];
+    if (!list.length) return null;
+    if (session.npViewId) {
+      const hit = list.find((x) => x.id === session.npViewId);
+      if (hit) return hit;
+      session.npViewId = null;
+    }
+    return list[0];
+  }
+
+  // ===========================================================================
+  // 渲染入口
+  // ===========================================================================
+
+  function renderNews(el) {
+    ensureNpState();
+    if (session.npTab === 'past') renderNpPast(el);
+    else if (session.npTab === 'clip') renderNpClip(el);
+    else renderNpRead(el);
+  }
+
+  /** 底部导航（三个页面共用） */
+  function npTabOpts(tab) {
+    return {
+      app: 'news',
+      tab: tab,
+      onTab: (id) => {
+        session.npTab = id;
+        session.npPage = 1;
+        if (id === 'read') session.npViewId = null;   // 从底部回读报 = 看最新一期
+        renderScreen();
+      },
+      onHome: () => gotoApp('home'),
+    };
+  }
+
+  /** 出版中就别再点了（一次出版 = 一次 AI 调用，重复点会连发） */
+  function npBusy() { return session.npBusy === 'pub'; }
+
+  /** 更新中心入口：被勾选才会被调，所以这里不再判断额外开关（勾了就是要） */
+  async function npUpdateAuto() {
+    await npPublish(true);
+    return true;
+  }
+
+  /** silent=true 时不弹 toast、不做中间态重绘（更新中心批量跑时用） */
+  async function npPublish(silent) {
+    if (npBusy()) { if (!silent) notify('正在出版，稍等片刻', 'info'); return false; }
+    const cfg = newsCfg();
+    const list = session.newsIssues || [];
+    session.npBusy = 'pub';
+    if (!silent) renderScreen();
+
+    let issue = null;
+    try {
+      const ctx = await storyContext();
+      const d = (typeof stockData === 'function') ? stockData() : null;
+      const market = (d && Array.isArray(d.pool) && d.pool.length)
+        ? d.pool.map((s) => s.name + '（' + s.sector + '）¥' + s.price).join('、')
+        : '（暂无股票池）';
+      const last = list[0];
+      const lastIssue = last
+        ? ('《第 ' + last.no + ' 期》' + (last.masthead.headline || '（无头条）'))
+        : '（本期为创刊号）';
+      const prompt = fillVars(promptText('newsIssue'), {
+        name: cfg.masthead || '（未定，请你起一个）',
+        date: newsWorldDate(),
+        lastIssue: lastIssue,
+        context: ctx,
+        market: market,
+      });
+      const resp = await llm(prompt, '报纸出版');
+      if (!resp) throw new Error(session.lastLlmErr || 'AI 无响应');
+      issue = npParse(resp);
+    } catch (e) {
+      softFail('报纸出版', e);
+    }
+    if (!issue) { issue = npLocalIssue(); if (!silent) notify('AI 未响应，本报以简讯方式刊出', 'warning'); }
+
+    // 民生版：本地模板池（不走 AI，零 token）
+    issue.life = (cfg.lifeStyle === 'off') ? [] : newsLifePick(cfg.lifeCount, cfg.lifeStyle);
+
+    // 财经版结算：走股票模块的统一入口（涨跌停内），再把真实涨跌幅回写到报纸上，
+    // 否则报纸写的 +8% 和实际盘面对不上。
+    if (issue.finance.length && typeof stockNewsApply === 'function') {
+      const real = stockNewsApply(issue.finance);
+      issue.finance.forEach((f) => {
+        const hit = real.find((r) => r.target === f.target);
+        if (hit) f.impact = hit.impact;
+      });
+    }
+
+    // 启事的相对天数 → 绝对日期（相对天数比绝对日期可靠：AI 不知道今天几号）
+    issue.chance.forEach((c) => { if (!c.date && c.days > 0) c.date = npDateFromDays(c.days); });
+
+    // 刊名：AI 起了一次就固定下来，之后每期都用它
+    if (!cfg.masthead && issue.masthead.name) { cfg.masthead = issue.masthead.name; saveConfig(); }
+    if (cfg.masthead) issue.masthead.name = cfg.masthead;
+
+    const saved = newsAdd(issue);
+    session.npBusy = '';
+    session.npTab = 'read';
+    session.npViewId = null;
+    if (!silent) {
+      renderScreen();
+      notify('《' + (saved.masthead.name || '报纸') + '》第 ' + saved.no + ' 期已发行'
+        + (saved.finance.length ? '，' + saved.finance.length + ' 条财经消息已影响盘面' : ''), 'success');
+    }
+    return true;
+  }
+
+  // ===========================================================================
+  // AI 解析 / 本地兜底
+  // ===========================================================================
+
+  /** AI 回复 → issue（结构不合法就返回 null，交给兜底） */
+  function npParse(resp) {
+    const obj = safeJson(resp);
+    if (!obj || typeof obj !== 'object') return null;
+    const mh = (obj.masthead && typeof obj.masthead === 'object') ? obj.masthead : {};
+    const front = (obj.front && typeof obj.front === 'object') ? obj.front : null;
+    const finance = Array.isArray(obj.finance) ? obj.finance : [];
+    const chance = Array.isArray(obj.chance) ? obj.chance : [];
+    if (!mh.headline && !front && !finance.length && !chance.length) return null;
+    return newsNormIssue({
+      source: 'ai',
+      masthead: { name: obj.name, headline: mh.headline, lead: mh.lead },
+      front: front ? { title: front.title, body: front.body, who: front.who } : null,
+      finance: finance.slice(0, 3).map((n) => ({
+        target: n && n.target, headline: n && n.headline, impact: n && n.impact, reason: n && n.reason,
+      })),
+      chance: chance.slice(0, 3).map((n) => ({
+        title: n && n.title, body: n && n.body, who: n && n.who, days: n && n.days,
+      })),
+    });
+  }
+
+  /** 本地兜底报纸：AI 不可用时也得有一期能读的东西（有股票池就带上两条行情观察） */
+  function npLocalIssue() {
+    const d = (typeof stockData === 'function') ? stockData() : null;
+    const pool = (d && Array.isArray(d.pool)) ? d.pool : [];
+    return newsNormIssue({
+      source: 'local',
+      masthead: {
+        name: '',
+        headline: '本报今日照常出刊',
+        lead: '今日无重大事件见诸报端。本报照常刊出，以供读者知晓市面近况。',
+      },
+      front: {
+        title: '编辑部致读者',
+        body: '本报今日收到的事件线索有限，暂以简讯方式刊出。若读者手上有亲历之事，'
+          + '尽可投书本报，一经采用，本报将派员跟进核实，并酌付报酬。',
+      },
+      finance: pool.slice(0, 2).map((s) => ({
+        target: s.name,
+        headline: '市场观察：' + s.name + '交投平稳，观望者众',
+        impact: Math.round((Math.random() * 1.6 - 0.8) * 10) / 10,
+        reason: '日常波动，未见重大消息。',
+      })),
+      chance: [{
+        title: '本报征集线索',
+        body: '本报长期征集本地见闻与事件线索，凡提供者一经采用，酌付报酬。来稿请注明时间、地点与所见。',
+        who: '本报编辑部',
+        days: 2,
+      }],
+    });
+  }
+
+  // ===========================================================================
+  // 工具
+  // ===========================================================================
+
+  /** 发行日：项目没有世界内日期系统，给个「第 N 日」式的相对日期，AI 拿到后自行润色成世界观日期 */
+  function newsWorldDate() {
+    const now = new Date();
+    const p = (x) => (x < 10 ? '0' + x : String(x));
+    return now.getFullYear() + '-' + p(now.getMonth() + 1) + '-' + p(now.getDate());
+  }
+
+  /** 相对天数 → YYYY-MM-DD（启事存日程用） */
+  function npDateFromDays(days) {
+    const n = Math.max(0, Math.floor(Number(days) || 0));
+    const d = new Date();
+    d.setDate(d.getDate() + n);
+    const p = (x) => (x < 10 ? '0' + x : String(x));
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  }
+
+  /** 条目标题：财经版用 headline，其余版用 title */
+  function npTitleOf(it, key) {
+    if (!it) return '';
+    if (key === 'finance') return it.headline || it.target || '';
+    return it.title || '';
+  }
+
+  // ===========================================================================
+  // 读报页
+  // ===========================================================================
+
+  function renderNpRead(el) {
+    const shell = uiShell(Object.assign(npTabOpts('read'), {
+      title: '报纸',
+      nav: {
+        actions: [{
+          icon: 'refresh',
+          title: npBusy() ? '出版中…' : '出版本期',
+          onClick: () => { npPublish(); },
+        }],
+      },
+    }));
+
+    const issue = npCurrent();
+    if (!issue) {
+      shell.body.classList.add('tph-np-paper');
+      shell.body.appendChild(uiBlank({
+        icon: 'news',
+        title: '还没有报纸',
+        text: '点右上角出版本期：头版要闻呼应最近的剧情，财经版直接影响股价，'
+          + '启事版的机会可以存进日程、写进记忆。',
+        fill: true,
+        actions: [{ text: npBusy() ? '出版中…' : '出版本期', icon: 'refresh', primary: true, onClick: () => { npPublish(); } }],
+      }));
+      el.appendChild(shell.root);
+      return;
+    }
+
+    // 纸色域：这一页的配色与字体由 .tph-np-paper 接管（见 13e-css-social.js）
+    shell.body.classList.add('tph-np-paper');
+
+    // 正在看往期时给一条回最新的提示
+    const list = session.newsIssues || [];
+    if (list[0] && issue.id !== list[0].id) {
+      const bar = h('div', { class: 'tph-np-latest' });
+      bar.appendChild(h('span', { class: 'tph-np-latest-t', text: '正在看往期 · 第 ' + issue.no + ' 期' }));
+      bar.appendChild(h('button', {
+        class: 'tph-np-latest-btn', type: 'button', text: '回到最新',
+        onclick: () => { session.npViewId = null; renderScreen(); },
+      }));
+      shell.body.appendChild(bar);
+    }
+
+    shell.body.appendChild(npMasthead(issue));
+    shell.body.appendChild(npNavBar(issue));
+    if (issue.front) shell.body.appendChild(npLead(issue, issue.front));
+    if (issue.finance.length) shell.body.appendChild(npSection(issue, 'finance', '财经行情', issue.finance));
+    if (issue.life.length) shell.body.appendChild(npSection(issue, 'life', '民生生活', issue.life));
+    if (issue.chance.length) shell.body.appendChild(npSection(issue, 'chance', '启事 · 机会', issue.chance));
+
+    const foot = h('div', { class: 'tph-np-foot', text: '本报由编辑部汇编 · 共 ' + npCount(issue) + ' 条' });
+    shell.body.appendChild(foot);
+
+    el.appendChild(shell.root);
+  }
+
+  /** 一期总条数 */
+  function npCount(issue) {
+    return (issue.front ? 1 : 0) + issue.finance.length + issue.life.length + issue.chance.length;
+  }
+
+  /**
+   * 报头：期号（上方等宽小字）→ 刊名（衬线大字，两侧细横线）→ 出版信息 → 三线分隔。
+   * 刊名不加书名号 —— 衬线大字 + 字距 + 两侧饰线已经足够「像刊头」，加书名号反而像引用。
+   */
+  function npMasthead(issue) {
+    const box = h('div', { class: 'tph-np-masthead' });
+    box.appendChild(h('div', { class: 'tph-np-mh-kicker', text: '第 ' + issue.no + ' 期' }));
+    const row = h('div', { class: 'tph-np-mh-row' });
+    row.appendChild(h('span', { class: 'tph-np-mh-name', text: issue.masthead.name || '未名报' }));
+    box.appendChild(row);
+    const meta = h('div', { class: 'tph-np-mh-meta' });
+    if (issue.date) meta.appendChild(h('span', { text: issue.date }));
+    meta.appendChild(h('span', { text: '共 ' + npCount(issue) + ' 条' }));
+    if (issue.source === 'local') meta.appendChild(h('span', { text: '简讯' }));
+    box.appendChild(meta);
+    box.appendChild(h('div', { class: 'tph-np-mh-rule' }));
+    return box;
+  }
+
+  /** 版面导航：报头下的「叠次」条，点了平滑滚到那一版（版面多时省得一路翻） */
+  function npNavBar(issue) {
+    const defs = [['front', '头版']];
+    if (issue.finance.length) defs.push(['finance', '财经']);
+    if (issue.life.length) defs.push(['life', '民生']);
+    if (issue.chance.length) defs.push(['chance', '启事']);
+    const nav = h('div', { class: 'tph-np-nav' });
+    defs.forEach((d) => {
+      nav.appendChild(h('button', {
+        class: 'tph-np-nav-b', type: 'button', text: d[1],
+        onclick: () => {
+          const host = nav.parentNode;
+          const target = host ? host.querySelector('[data-sec="' + d[0] + '"]') : null;
+          if (target && target.scrollIntoView) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        },
+      }));
+    });
+    return nav;
+  }
+
+  /** 头版要闻：头条标题 + 导语 + 正文（首字下沉靠 CSS ::first-letter） */
+  function npLead(issue, front) {
+    const box = h('div', { class: 'tph-np-lead', 'data-sec': 'front' });
+    const head = h('div', { class: 'tph-np-lead-h', text: front.title || issue.masthead.headline || '' });
+    box.appendChild(head);
+    if (issue.masthead.lead) box.appendChild(h('div', { class: 'tph-np-lead-b', text: issue.masthead.lead }));
+    if (front.body) box.appendChild(h('div', { class: 'tph-np-lead-b drop', text: front.body }));
+    if (front.who) box.appendChild(h('div', { class: 'tph-np-lead-who', text: '涉及：' + front.who }));
+    const btns = h('div', { class: 'tph-np-itemfoot' });
+    btns.appendChild(npStar(issue, front));
+    box.appendChild(btns);
+    return box;
+  }
+
+  /** 一个版面：小标题（版面名 + 条数）+ 条目 */
+  function npSection(issue, key, name, items) {
+    const box = h('div', { class: 'tph-np-sec', 'data-sec': key });
+    const head = h('div', { class: 'tph-np-sec-h' });
+    head.appendChild(h('span', { class: 'tph-np-sec-t', text: name }));
+    head.appendChild(h('span', { class: 'tph-np-sec-c', text: items.length + ' 条' }));
+    box.appendChild(head);
+    items.forEach((it) => {
+      if (key === 'chance') box.appendChild(npHook(issue, it));
+      else box.appendChild(npItem(issue, key, it));
+    });
+    return box;
+  }
+
+  /** 普通条目（头版金句 / 财经 / 民生共用） */
+  function npItem(issue, key, it) {
+    const card = h('div', { class: 'tph-np-item' });
+    const top = h('div', { class: 'tph-np-item-top' });
+    top.appendChild(h('span', { class: 'tph-np-item-h', text: npTitleOf(it, key) }));
+    if (key === 'finance') top.appendChild(npChg(it.impact));
+    card.appendChild(top);
+    if (key === 'finance') {
+      const sub = [];
+      if (it.target) sub.push('目标 ' + it.target);
+      if (it.reason) sub.push(it.reason);
+      if (sub.length) card.appendChild(h('div', { class: 'tph-np-item-sub', text: sub.join(' · ') }));
+    } else if (it.body) {
+      card.appendChild(h('div', { class: 'tph-np-item-b', text: it.body }));
+    }
+    if (it.who) card.appendChild(h('div', { class: 'tph-np-item-who', text: '涉及：' + it.who }));
+    const foot = h('div', { class: 'tph-np-itemfoot' });
+    foot.appendChild(npStar(issue, it));
+    card.appendChild(foot);
+    return card;
+  }
+
+  /** 启事条目（剧情钩子）：正文 + 发布者 + 两个落地按钮 */
+  function npHook(issue, it) {
+    const card = h('div', { class: 'tph-np-hook' });
+    const top = h('div', { class: 'tph-np-item-top' });
+    top.appendChild(h('span', { class: 'tph-np-item-h', text: it.title || '' }));
+    if (it.days > 0) top.appendChild(h('span', { class: 'tph-np-item-tag', text: it.days + ' 日内' }));
+    card.appendChild(top);
+    if (it.body) card.appendChild(h('div', { class: 'tph-np-item-b', text: it.body }));
+    if (it.who) card.appendChild(h('div', { class: 'tph-np-item-who', text: '发布：' + it.who }));
+
+    const btns = h('div', { class: 'tph-np-hook-btns' });
+    btns.appendChild(h('button', {
+      class: 'tph-np-hook-btn' + (it.filed ? ' on' : ''), type: 'button',
+      text: it.filed ? '已在日程' : '存进日程',
+      onclick: () => npApplyChance(issue, it, 'cal'),
+    }));
+    btns.appendChild(h('button', {
+      class: 'tph-np-hook-btn' + (it.memed ? ' on' : ''), type: 'button',
+      text: it.memed ? '已记住' : '记住它',
+      onclick: () => npApplyChance(issue, it, 'mem'),
+    }));
+    card.appendChild(btns);
+
+    const foot = h('div', { class: 'tph-np-itemfoot' });
+    foot.appendChild(npStar(issue, it));
+    card.appendChild(foot);
+    return card;
+  }
+
+  /** 涨跌标记：红涨绿跌（跟随 A 股习惯） */
+  function npChg(v) {
+    const n = Number(v) || 0;
+    const cls = n > 0 ? ' up' : (n < 0 ? ' down' : ' flat');
+    const txt = (n > 0 ? '+' : '') + (Math.round(n * 10) / 10) + '%';
+    return h('span', { class: 'tph-np-chg' + cls, text: txt });
+  }
+
+  /** 剪报星标：条目级收藏 */
+  function npStar(issue, it) {
+    const on = issue.clips.indexOf(it.id) >= 0;
+    return h('button', {
+      class: 'tph-np-star' + (on ? ' on' : ''), type: 'button',
+      title: on ? '已剪报' : '剪报留存',
+      onclick: () => { newsToggleClip(issue.id, it.id); renderScreen(); },
+    }, [iconSvg('star', 13)]);
+  }
+
+  /** 启事的两个出口：存进日程 / 写进记忆 */
+  function npApplyChance(issue, it, kind) {
+    if (kind === 'cal') {
+      if (it.filed) { notify('这条已经在日程里了', 'info'); return; }
+      const date = it.date || npDateFromDays(it.days || 3);
+      const e = calendarAdd(date, '【报纸】' + (it.title || '启事'),
+        (it.body || '') + (it.who ? '（发布者：' + it.who + '）' : ''), 'ai');
+      if (!e) { notify('存入日程失败', 'warning'); return; }
+      it.filed = true;
+      notify('已存入日程 · ' + date, 'success');
+    } else {
+      if (it.memed) { notify('这条已经记过了', 'info'); return; }
+      addMemory('event', '报纸启事：' + (it.title || ''),
+        (it.body || '') + (it.who ? '（发布者：' + it.who + '）' : ''),
+        API.lastMessageId() || 0, 'auto');
+      it.memed = true;
+      notify('已写进记忆，往后剧情接得住', 'success');
+    }
+    saveNews();
+    renderScreen();
+  }
+
+  // ===========================================================================
+  // 往期 / 剪报
+  // ===========================================================================
+
+  function renderNpPast(el) {
+    const shell = uiShell(Object.assign(npTabOpts('past'), {
+      title: '往期',
+      nav: { search: '搜索往期报纸', query: session.npQuery, onSearch: (v) => { session.npQuery = v; session.npPage = 1; renderScreen(); } },
+    }));
+
+    const all = (session.newsIssues || []).slice();
+    const list = all.filter((x) => uiHit(session.npQuery, x.masthead.headline, x.masthead.lead, x.date));
+
+    shell.body.classList.add('tph-np-paper');
+    if (!list.length) {
+      shell.body.appendChild(uiBlank({
+        icon: 'time',
+        title: all.length ? '没有匹配的期数' : '还没有往期',
+        text: all.length ? '换个词再搜搜。' : '出版第一期之后，这里会按时间倒序堆起来。',
+        fill: true,
+      }));
+      el.appendChild(shell.root);
+      return;
+    }
+
+    const shown = uiSlice(list, session.npPage, UI_PAGE);
+    shown.forEach((it) => shell.body.appendChild(npIssueRow(it)));
+    shell.body.appendChild(uiMoreBar(uiMore(list, session.npPage, UI_PAGE),
+      () => { session.npPage++; renderScreen(); }, false));
+
+    el.appendChild(shell.root);
+  }
+
+  /** 往期一行：左侧反白期号方块 + 右侧衬线头条 + 删除键（做成「报纸封面卡」而不是普通列表行） */
+  function npIssueRow(issue) {
+    const row = h('div', { class: 'tph-np-issue' });
+    // 期号方块与卡片等高 —— 这块反白是整个「封面感」的来源
+    const no = h('div', { class: 'tph-np-issue-no' });
+    no.appendChild(h('b', { text: String(issue.no) }));
+    no.appendChild(h('i', { text: '期' }));
+    row.appendChild(no);
+
+    const main = h('div', { class: 'tph-np-issue-main' });
+    main.appendChild(h('div', { class: 'tph-np-issue-h', text: issue.masthead.headline || '（无头条）' }));
+    const meta = [];
+    if (issue.date) meta.push(issue.date);
+    meta.push('共 ' + npCount(issue) + ' 条');
+    main.appendChild(h('div', { class: 'tph-np-issue-d', text: meta.join(' · ') }));
+    main.addEventListener('click', () => {
+      session.npViewId = issue.id;
+      session.npTab = 'read';
+      renderScreen();
+    });
+    row.appendChild(main);
+    row.appendChild(h('button', {
+      class: 'tph-np-issue-del', type: 'button', title: '删除这一期',
+      onclick: () => {
+        newsDel(issue.id);
+        if (session.npViewId === issue.id) session.npViewId = null;
+        notify('已删除', 'info');
+        renderScreen();
+      },
+    }, [iconSvg('trash', 14)]));
+    return row;
+  }
+
+  function renderNpClip(el) {
+    const shell = uiShell(Object.assign(npTabOpts('clip'), { title: '剪报' }));
+    shell.body.classList.add('tph-np-paper');
+    const items = newsClipped();
+    if (!items.length) {
+      shell.body.appendChild(uiBlank({
+        icon: 'star',
+        title: '剪报夹是空的',
+        text: '读报时点条目右下角的星标，就能把它留在这里，回头好找。',
+        fill: true,
+      }));
+      el.appendChild(shell.root);
+      return;
+    }
+    const shown = uiSlice(items, session.npPage, UI_PAGE);
+    shown.forEach((c) => {
+      const card = npItem(c.issue, c.key, c.item);
+      card.appendChild(h('div', {
+        class: 'tph-np-clip-src',
+        text: '《' + (c.issue.masthead.name || '未名报') + '》第 ' + c.issue.no + ' 期 · ' + npSectionName(c.key),
+      }));
+      shell.body.appendChild(card);
+    });
+    shell.body.appendChild(uiMoreBar(uiMore(items, session.npPage, UI_PAGE),
+      () => { session.npPage++; renderScreen(); }, false));
+    el.appendChild(shell.root);
+  }
+
+  /** 版面 key → 中文名（剪报页标注来源用） */
+  function npSectionName(key) {
+    if (key === 'front') return '头版要闻';
+    if (key === 'finance') return '财经行情';
+    if (key === 'life') return '民生生活';
+    if (key === 'chance') return '启事 · 机会';
+    return '正文';
+  }
+
+  // ===========================================================================
   // 18. 楼层内嵌（把手机挂进聊天楼层：占位符 → 挂载点 → MutationObserver 注入）
   // ---------------------------------------------------------------------------
   // 挂载点由正则产出：<div data-tph-mount="wechat" data-tph-chan="林知夏"></div>
@@ -25812,6 +27243,7 @@ function mediaCssRules() {
     else if (app === 'tieba') renderTieba(el);
     else if (app === 'rednote') renderRedNote(el);
     else if (app === 'x') renderX(el);
+    else if (app === 'news') renderNews(el);
     else if (app === 'memory') renderMemory(el);
     else if (app === 'music') renderMusic(el);
     else if (app === 'theater') renderTheater(el);
@@ -26100,6 +27532,16 @@ function mediaCssRules() {
           fee: stockFee, luckCount: stockLuckCount, luckBias: stockLuckBias,
           lossLevel: stockLossLevel, sms: stockSms, brokerChat: stockBrokerChat,
           genInsider: stockGenInsider, genReview: stockGenReview, genShock: stockGenShock,
+          applyMove: stockApplyMove, indexCalc: stockIndexCalc,
+          tipParse: stockTipParse, tipsResolve: stockResolveTips,
+          newsApply: stockNewsApply,
+        },
+        _news: {                        // —— 报纸（测试出口）——
+          cfg: newsCfg, lifePick: newsLifePick, normIssue: newsNormIssue,
+          load: loadNews, save: saveNews, add: newsAdd, del: newsDel,
+          toggleClip: newsToggleClip, clipped: newsClipped, count: npCount,
+          parse: npParse, local: npLocalIssue, dateFromDays: npDateFromDays,
+          titleOf: npTitleOf, sectionName: npSectionName, worldDate: newsWorldDate,
         },
         // —— 自定义接口（测试出口）——
         _customApiReady: customApiReady,
